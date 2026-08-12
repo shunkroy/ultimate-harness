@@ -1,0 +1,3 @@
+#!/bin/sh
+export PYTHONPATH="/opt/harness2${PYTHONPATH:+:$PYTHONPATH}"
+exec /usr/bin/python3 -m harness2 "$@"

@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+if [ "$#" -eq 0 ]; then
+  printf '%s\n' 'prime-cli compatibility wrapper (Harness v2)'
+  printf '%s\n' 'commands: start stop restart status doctor run agents send schedule watch log'
+  exit 0
+fi
+command="$1"
+shift
+case "$command" in
+  start|stop|restart|status|watch|send|schedule|attach|list)
+    exec /usr/local/bin/harness prime "$command" "$@"
+    ;;
+  agents)
+    exec /usr/local/bin/harness prime list --all --prime-json "$@"
+    ;;
+  doctor)
+    exec /usr/local/bin/harness doctor "$@"
+    ;;
+  run)
+    exec /usr/local/bin/harness run "$@"
+    ;;
+  log)
+    exec /usr/local/bin/harness log "$@"
+    ;;
+  *)
+    printf 'unknown prime-cli command: %s\n' "$command" >&2
+    exit 2
+    ;;
+esac

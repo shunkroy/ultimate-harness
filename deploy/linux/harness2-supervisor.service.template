@@ -1,0 +1,13 @@
+[Unit]
+Description=Harness v2 supervisor
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__HARNESS_PATH__ supervise --interval 30
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

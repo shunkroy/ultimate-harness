@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harness2"
+version = "2.1.0"
+description = "Provider-independent agent harness with executable context runtime"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+harness = "harness2.cli:main"
+
+[tool.setuptools]
+packages = ["harness2", "harness2.adapters", "harness2.kernel", "harness2.context"]
