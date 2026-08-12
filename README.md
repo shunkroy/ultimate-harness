@@ -13,16 +13,18 @@ Termux or Linux:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSLo /tmp/install-harness2.sh \
-  https://raw.githubusercontent.com/shunkroy/ultimate-harness/main/install-release.sh && \
+  https://raw.githubusercontent.com/shunkroy/ultimate-harness/v2.1.0/install.sh && \
 sh /tmp/install-harness2.sh
 ```
 
-The installer downloads the versioned GitHub Release wheel and `SHA256SUMS`,
-verifies the wheel before execution, installs it in an isolated venv under
+The version-pinned installer downloads the GitHub Release wheel and
+`SHA256SUMS`, verifies both against its embedded SHA-256 pin before execution,
+installs it in an isolated venv under
 `~/.local/share/harness2`, pins installed-source integrity, and starts the
 bounded always-active runtime. Native Termux prerequisites:
 `pkg install python openssl curl coreutils`. Debian/Ubuntu prerequisites:
-`sudo apt install python3 python3-venv python3-pip openssl curl coreutils`.
+`sudo apt install python3 python3-pip openssl curl coreutils`; `python3-venv` is
+recommended, with a private target-directory fallback when unavailable.
 
 Supported terminals/platforms:
 
