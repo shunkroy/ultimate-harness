@@ -29,13 +29,11 @@ def _inside(path: Optional[str], root: str) -> bool:
 
 def guarded_roots() -> tuple[str, ...]:
     configured = os.environ.get("HARNESS_GUARDED_ROOTS")
-    if configured is not None:
-        return tuple(os.path.abspath(os.path.expanduser(p)) for p in configured.split(os.pathsep) if p)
-    device_root = "/root/kirti_project"
-    is_phone_proot = os.path.expanduser("~") == "/root" and (
-        "PROOT_L2S_DIR" in os.environ or "proot" in os.uname().release.lower()
+    return tuple(
+        os.path.abspath(os.path.expanduser(path))
+        for path in (configured or "").split(os.pathsep)
+        if path
     )
-    return (device_root,) if is_phone_proot or os.path.exists(device_root) else ()
 
 
 def expert_for_task(task: str) -> tuple[str, Optional[str], str]:
@@ -53,7 +51,7 @@ def expert_for_task(task: str) -> tuple[str, Optional[str], str]:
         decision = module.AutoSwitcher().route(task, dry_run=True)
         return decision.recommended_agent, decision.recommended_model, decision.reasoning
     except Exception as exc:
-        return "build", None, f"expert classifier unavailable: {exc}"
+        return os.environ.get("HARNESS_DEFAULT_AGENT") or None, os.environ.get("HARNESS_DEFAULT_MODEL") or None, f"expert classifier unavailable: {exc}"
 
 
 class PolicyRouter:
@@ -86,7 +84,7 @@ class PolicyRouter:
             if explicit and request.engine not in ("opencode", "auto"):
                 raise PolicyRefusal("untrusted tasks may only use the read-only OpenCode sandbox agent")
             return RoutingDecision(
-                "opencode", "harness-sandbox", request.model or "openai/gpt-5.6-sol",
+                "opencode", "harness-sandbox", request.model,
                 "untrusted policy: plugins off, read-only sandbox agent", (), "untrusted",
             )
 
@@ -122,6 +120,6 @@ class PolicyRouter:
             raise PolicyRefusal("no healthy external engine is available")
 
         return RoutingDecision(
-            "opencode", request.agent or agent, request.model or model or "openai/gpt-5.6-sol",
+            "opencode", request.agent or agent, request.model or model,
             "OpenCode control-plane policy; " + expert_reason, (), "control",
         )

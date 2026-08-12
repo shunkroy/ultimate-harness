@@ -6,8 +6,23 @@ build-backend = "setuptools.build_meta"
 name = "harness2"
 version = "2.1.0"
 description = "Provider-independent agent harness with executable context runtime"
+readme = "README.md"
+license = "MIT"
+authors = [{name = "shunkroy"}]
 requires-python = ">=3.11"
 dependencies = []
+keywords = ["agent", "orchestration", "context-runtime", "termux"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/shunkroy/ultimate-harness"
+Repository = "https://github.com/shunkroy/ultimate-harness"
+Issues = "https://github.com/shunkroy/ultimate-harness/issues"
 
 [project.scripts]
 harness = "harness2.cli:main"

@@ -25,8 +25,8 @@ class HarnessConfig:
     python_bin: Optional[str] = None
     openssl_bin: Optional[str] = None
     local_url: str = field(default_factory=lambda: os.environ.get("HARNESS_LOCAL_URL", "http://127.0.0.1:8080/v1"))
-    free_model: str = field(default_factory=lambda: os.environ.get("HARNESS_DEFAULT_MODEL", "openai/gpt-5.6-sol"))
-    default_agent: str = field(default_factory=lambda: os.environ.get("HARNESS_DEFAULT_AGENT", "build"))
+    free_model: Optional[str] = field(default_factory=lambda: os.environ.get("HARNESS_DEFAULT_MODEL") or None)
+    default_agent: Optional[str] = field(default_factory=lambda: os.environ.get("HARNESS_DEFAULT_AGENT") or None)
 
     def __post_init__(self) -> None:
         state = str(Path(self.state_root).expanduser()) if self.state_root else str(self.platform.state_dir)

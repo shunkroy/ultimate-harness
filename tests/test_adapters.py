@@ -57,6 +57,15 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(result.error, "failed")
         self.assertEqual(result.text, "partial")
 
+    def test_opencode_omits_unconfigured_agent_and_model(self):
+        stream = '{"type":"step_finish","part":{"type":"step-finish"}}'
+        with patch("subprocess.run", return_value=proc(stream)) as run:
+            result = OpenCodeAdapter(self.config).run(RunRequest("x"))
+        self.assertTrue(result.success)
+        argv = run.call_args.args[0]
+        self.assertNotIn("--agent", argv)
+        self.assertNotIn("-m", argv)
+
     def test_zen_requires_key_and_namespace(self):
         adapter = ZenAdapter(self.config)
         self.assertFalse(adapter.run(RunRequest("x")).success)

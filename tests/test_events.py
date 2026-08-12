@@ -1,6 +1,6 @@
 """Tests for harness2.events -- OpenCode --format json and Prime --mode json.
 
-Run from /opt/harness2 with either:
+Run from the repository root with either:
 
     python3 -m unittest tests.test_events -v
     python3 -m pytest tests/test_events.py -v

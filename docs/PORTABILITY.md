@@ -14,7 +14,8 @@ JSONL parsers, encrypted jobs and audit ledger are shared across all platforms.
 | PRoot | PRoot-safe exact parent identity + AF_UNIX | `~/.harness2` | hardened wrapper, locks, pidfiles and socket probe |
 
 Executable and path discovery are centralized in `harness2.platforms`; engine
-adapters do not hardcode `/root`, `/usr/bin`, PowerShell, bash or CMD.
+adapters and POSIX launchers do not assume a fixed checkout or installation
+path. Platform candidate paths remain bounded and explicit.
 
 Deployment templates are in `deploy/`: systemd user service (Linux), launchd
 plist (macOS), and PowerShell Task Scheduler installer/uninstaller (Windows).

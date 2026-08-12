@@ -136,8 +136,7 @@ def _integrity_checks(config: HarnessConfig) -> List[Check]:
     return checks
 
 
-def _guardian_check() -> Check:
-    state = "/root/.kirti_guardian/guardian_state.json"
+def _external_guardian_check(state: str, process_marker: str) -> Check:
     try:
         with open(state, encoding="utf-8") as fh:
             payload = json.load(fh)
@@ -147,20 +146,20 @@ def _guardian_check() -> Check:
         heartbeat = time.mktime(time.strptime(last_scan, "%Y-%m-%d %H:%M:%S"))
         age = time.time() - heartbeat
     except OSError:
-        return Check("kirti.guardian", False, "guardian state missing", "critical")
+        return Check("external.guardian", False, "guardian state missing", "critical")
     except (ValueError, TypeError) as exc:
-        return Check("kirti.guardian", False, f"guardian state invalid: {exc}", "critical")
+        return Check("external.guardian", False, f"guardian state invalid: {exc}", "critical")
     alive = False
     try:
         proc = subprocess.run(["ps", "-eo", "args="], capture_output=True, text=True, timeout=10)
-        alive = any("kirti_guardian" in line or "guardian_loop" in line for line in proc.stdout.splitlines())
+        alive = any(process_marker in line for line in proc.stdout.splitlines())
     except Exception:
         pass
     # A normal scan can take several minutes on the protected Android SDK and
     # archive trees. The guardian loop independently detects a truly hung scan
     # after its longer grace/staleness window.
     ok = alive and age <= 300
-    return Check("kirti.guardian", ok, f"process={'up' if alive else 'down'}, heartbeat_age={int(age)}s", "critical")
+    return Check("external.guardian", ok, f"process={'up' if alive else 'down'}, heartbeat_age={int(age)}s", "critical")
 
 
 def run_checks(config: HarnessConfig, store: Store) -> List[Check]:
@@ -182,8 +181,10 @@ def run_checks(config: HarnessConfig, store: Store) -> List[Check]:
         checks.append(Check("disk.free", free >= 2, f"{free:.1f} GiB free", "warning" if free >= 2 else "critical"))
     except Exception as exc:
         checks.append(Check("disk.free", False, str(exc)))
-    if config.platform.kind.value == "proot" and str(config.platform.home) == "/root":
-        checks.append(_guardian_check())
+    guardian_state = os.environ.get("HARNESS_GUARDIAN_STATE")
+    guardian_marker = os.environ.get("HARNESS_GUARDIAN_PROCESS")
+    if guardian_state and guardian_marker:
+        checks.append(_external_guardian_check(guardian_state, guardian_marker))
     active = active_status(config)
     checks.append(Check(
         "runtime.always_active",

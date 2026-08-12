@@ -7,21 +7,26 @@ if [ "$#" -eq 0 ]; then
 fi
 command="$1"
 shift
+HARNESS_BIN="${HARNESS_LAUNCHER:-$(command -v harness || true)}"
+if [ -z "$HARNESS_BIN" ]; then
+  SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+  HARNESS_BIN="$SCRIPT_DIR/harness"
+fi
 case "$command" in
   start|stop|restart|status|watch|send|schedule|attach|list)
-    exec /usr/local/bin/harness prime "$command" "$@"
+    exec "$HARNESS_BIN" prime "$command" "$@"
     ;;
   agents)
-    exec /usr/local/bin/harness prime list --all --prime-json "$@"
+    exec "$HARNESS_BIN" prime list --all --prime-json "$@"
     ;;
   doctor)
-    exec /usr/local/bin/harness doctor "$@"
+    exec "$HARNESS_BIN" doctor "$@"
     ;;
   run)
-    exec /usr/local/bin/harness run "$@"
+    exec "$HARNESS_BIN" run "$@"
     ;;
   log)
-    exec /usr/local/bin/harness log "$@"
+    exec "$HARNESS_BIN" log "$@"
     ;;
   *)
     printf 'unknown prime-cli command: %s\n' "$command" >&2

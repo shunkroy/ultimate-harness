@@ -88,7 +88,12 @@ when needed:
 
 `HARNESS_OPENCODE_BIN`, `HARNESS_PRIME_BIN`, `HARNESS_PRIME_REPO`,
 `HARNESS_HERMES_BIN`, `HARNESS_NODE_BIN`, `HARNESS_PYTHON_BIN`,
-`HARNESS_OPENSSL_BIN`, `HARNESS2_HOME`, `HARNESS_DEFAULT_MODEL`.
+`HARNESS_OPENSSL_BIN`, `HARNESS2_HOME`, `HARNESS_DEFAULT_MODEL`,
+`HARNESS_DEFAULT_AGENT`. Optional protected roots use the path-separated
+`HARNESS_GUARDED_ROOTS`; external guardian diagnostics require both
+`HARNESS_GUARDIAN_STATE` and `HARNESS_GUARDIAN_PROCESS`. Extra paths for
+`doctor --fix-modes` can be supplied through path-separated
+`HARNESS_HARDEN_PATHS`.
 
 State paths follow OS conventions: `%LOCALAPPDATA%\Harness2` on Windows,
 `~/Library/Application Support/Harness2` on macOS, XDG state on Linux, and

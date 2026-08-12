@@ -17,7 +17,7 @@ from unittest.mock import patch
 from harness2.circuit import CircuitBreaker
 from harness2.cli import build_parser, positive_int
 from harness2.config import HarnessConfig
-from harness2.doctor import _guardian_check, _integrity_checks, core_integrity_artifacts, integrity_artifacts
+from harness2.doctor import _external_guardian_check, _integrity_checks, core_integrity_artifacts, integrity_artifacts
 from harness2.models import CapabilityStatus, EngineResult, EngineStatus, RoutingDecision, RunRequest
 from harness2.policy import PolicyRefusal, PolicyRouter
 from harness2.security import atomic_write_json, ensure_private_dir, read_private_json, redact, task_hash
@@ -101,14 +101,14 @@ class DoctorTests(unittest.TestCase):
         mocked_open = unittest.mock.mock_open(read_data=json.dumps(payload))
         proc = unittest.mock.Mock(stdout="/bin/bash guardian_loop.sh\n")
         with patch("builtins.open", mocked_open), patch("harness2.doctor.subprocess.run", return_value=proc):
-            self.assertTrue(_guardian_check().ok)
+            self.assertTrue(_external_guardian_check("/state.json", "guardian_loop").ok)
 
     def test_guardian_rejects_stale_last_scan(self):
         payload = {"last_scan": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 301))}
         mocked_open = unittest.mock.mock_open(read_data=json.dumps(payload))
-        proc = unittest.mock.Mock(stdout="python kirti_guardian.py\n")
+        proc = unittest.mock.Mock(stdout="python external_guardian.py\n")
         with patch("builtins.open", mocked_open), patch("harness2.doctor.subprocess.run", return_value=proc):
-            self.assertFalse(_guardian_check().ok)
+            self.assertFalse(_external_guardian_check("/state.json", "guardian").ok)
 
 
 class StoreTests(unittest.TestCase):
@@ -181,8 +181,14 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(decision.engine, "hermes")
 
     def test_guarded_cwd_refused(self):
-        with self.assertRaises(PolicyRefusal):
-            PolicyRouter(statuses()).decide(RunRequest("work", cwd="/root/kirti_project"))
+        with patch.dict(os.environ, {"HARNESS_GUARDED_ROOTS": "/srv/protected"}):
+            with self.assertRaises(PolicyRefusal):
+                PolicyRouter(statuses()).decide(RunRequest("work", cwd="/srv/protected/project"))
+
+    def test_guarded_roots_are_opt_in(self):
+        with patch.dict(os.environ, {}, clear=True):
+            decision = PolicyRouter(statuses()).decide(RunRequest("work", cwd="/root/example"))
+        self.assertEqual(decision.engine, "opencode")
 
 
 class CliTests(unittest.TestCase):

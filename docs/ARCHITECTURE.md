@@ -1,12 +1,12 @@
 # Harness v2 architecture
 
 ```
-OpenCode (brain/router) -> Harness v2 deterministic control plane
-                         -> OpenCode adapter (normal work)
-                         -> Zen adapter (curated paid models)
-                         -> Prime adapter (durable/IPython/RLM)
-                         -> Hermes adapter (messaging/parallel worker)
-                         -> Local adapter (loopback, disabled by default)
+Harness Kernel -> policy + capability/runtime registries + audit/state
+               -> OpenCode adapter (optional coding/research provider)
+               -> Zen adapter (optional curated-model provider)
+               -> Prime adapter (optional durable/IPython/RLM provider)
+               -> Hermes adapter (optional messaging/parallel provider)
+               -> Local adapter (optional loopback provider)
 ```
 
 Explicit engine selection outranks policy. Sensitive tasks are loopback-only;

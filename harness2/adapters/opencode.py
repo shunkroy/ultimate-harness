@@ -1,4 +1,4 @@
-"""OpenCode brain and OpenCode Zen semantic provider adapters."""
+"""OpenCode and OpenCode Zen provider adapters."""
 
 from __future__ import annotations
 
@@ -34,7 +34,11 @@ class OpenCodeAdapter(EngineAdapter):
         started = time.monotonic()
         model = request.model or self.config.free_model
         agent = request.agent or self.config.default_agent
-        argv = [*self.config.command("opencode"), "run", "--format", "json", "--agent", agent, "-m", model]
+        argv = [*self.config.command("opencode"), "run", "--format", "json"]
+        if agent:
+            argv += ["--agent", agent]
+        if model:
+            argv += ["-m", model]
         if request.untrusted:
             argv.append("--pure")
         if request.cwd:

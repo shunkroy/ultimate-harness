@@ -120,11 +120,8 @@ def cmd_doctor(args) -> int:
     result = summarize(run_checks(config, store))
     if args.fix_modes:
         paths = [config.state_root, config.database_path, config.database_path + "-wal", config.database_path + "-shm"]
-        if config.platform.kind.value == "proot" and str(config.platform.home) == "/root":
-            paths.extend((
-                "/root/.harness", "/root/.harness/runs.jsonl", "/root/.prime-cli", "/root/.prime-cli/runs.jsonl",
-                "/root/.prime", "/tmp/prime-supervisor.out",
-            ))
+        configured_paths = os.environ.get("HARNESS_HARDEN_PATHS", "")
+        paths.extend(path for path in configured_paths.split(os.pathsep) if path)
         changed = harden_paths(paths)
         result["mode_fixes"] = changed
     if args.json:

@@ -9,9 +9,9 @@ covered by the local test suite. They remain unbenchmarked and are not labeled
 stable.
 
 This document is the evidence-based baseline for the Ultimate Harness work. It
-describes the code under `/opt/harness2`; external products are capability
-providers, not the identity of the harness. No component is called stable or
-benchmarked without corresponding evidence.
+describes the v2.1.0 source release; external products are capability providers,
+not the identity of the harness. No component is called stable or benchmarked
+without corresponding evidence.
 
 ## A. Current architecture
 
@@ -36,13 +36,13 @@ metadata audit ledger. Runtime construction is still centered in
 
 | Provider/runtime | Local observation | Harness status |
 |---|---|---|
-| Harness | Python package 2.0.0 | implemented and tested |
-| OpenCode | CLI 1.18.15 | active; private-file input and JSONL output |
-| Prime Agent | bundle 0.7.2 | active daemon; private-file input and JSONL output |
-| Hermes | binary discovered | adapter implemented; task text is argv-visible; configured upstream provider requires repair |
-| OpenCode Zen | adapter exists | implemented but unconfigured/disabled |
-| Local OpenAI-compatible endpoint | loopback adapter exists | implemented but disabled/down |
-| Git, Python, Node, OpenSSL and build tools | discovered locally | available as tools, not yet first-class providers |
+| Harness | Python package 2.1.0 | implemented and tested |
+| OpenCode | optional CLI | private-file input and JSONL output implemented |
+| Prime Agent | optional CLI/source bundle | private-file input, JSONL output and supervision implemented |
+| Hermes | optional CLI | adapter implemented; task text is argv-visible |
+| OpenCode Zen | optional provider | implemented; requires explicit credential/configuration |
+| Local OpenAI-compatible endpoint | optional loopback endpoint | implemented; disabled by default |
+| Git, Python, Node, OpenSSL and build tools | environment dependencies/tools | discovered when present; not capability evidence by presence alone |
 
 Authentication names are represented without credential values. Harness knows
 `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, and
@@ -83,19 +83,17 @@ process; that is a compatibility integration, not a general skill runtime.
 - Service existence and desired always-active mode are not the same as a fresh
   service heartbeat; status must distinguish them.
 
-## F. Critical gaps
+## F. Historical gaps closed in v2.1.0
 
-1. No provider-independent Harness Kernel and no typed provider catalog.
-2. No evidence-bearing machine-readable capability registry.
-3. No generic, declarative CLI discovery contract.
-4. No native skill lifecycle, benchmarks, or garbage collection.
-5. No ContextIR, ContextCompiler, ContextPackage, or ContextRuntime.
-6. No persistent typed event bus or unified task state machine.
-7. No empirical model/provider score history.
-8. No execution-cost/resource governor.
-9. No structured context state, composition, cache, or semantic diff.
-10. Always-active behavior is available through a service command but was not
-    previously a truthful default with heartbeat evidence.
+The first slice closed the provider-independent kernel/catalog, capability
+registry, bounded declarative discovery, executable-context types/runtime, and
+truthful always-active heartbeat gaps. Remaining gaps are:
+
+1. No native skill lifecycle, benchmarks, or garbage collection.
+2. No persistent typed event bus or unified task state machine.
+3. No empirical model/provider score history.
+4. No execution-cost/resource governor.
+5. No semantic context composition, cache, or semantic diff.
 
 ## G. What must be preserved
 
@@ -154,6 +152,6 @@ fail-closed validation, private state, bounded queues, deterministic execution,
 and explicit evidence labels.
 
 Rollback is file-level: stop the Harness service, retain the SQLite database and
-context sources, restore the previous `/opt/harness2` code, and restart the old
-service. The first slice uses additive files and avoids destructive schema
-changes.
+context sources, restore the previous tagged source or installed wheel, and
+restart the old service. The first slice uses additive files and avoids
+destructive schema changes.
