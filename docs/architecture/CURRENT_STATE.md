@@ -9,7 +9,7 @@ covered by the local test suite. They remain unbenchmarked and are not labeled
 stable.
 
 This document is the evidence-based baseline for the Ultimate Harness work. It
-describes the v2.1.0 source release; external products are capability providers,
+describes the v2.1.1 source release; external products are capability providers,
 not the identity of the harness. No component is called stable or benchmarked
 without corresponding evidence.
 
@@ -36,7 +36,7 @@ metadata audit ledger. Runtime construction is still centered in
 
 | Provider/runtime | Local observation | Harness status |
 |---|---|---|
-| Harness | Python package 2.1.0 | implemented and tested |
+| Harness | Python package 2.1.1 | implemented and tested |
 | OpenCode | optional CLI | private-file input and JSONL output implemented |
 | Prime Agent | optional CLI/source bundle | private-file input, JSONL output and supervision implemented |
 | Hermes | optional CLI | adapter implemented; task text is argv-visible |

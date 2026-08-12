@@ -13,7 +13,7 @@ Termux or Linux:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSLo /tmp/install-harness2.sh \
-  https://raw.githubusercontent.com/shunkroy/ultimate-harness/v2.1.0/install.sh && \
+  https://raw.githubusercontent.com/shunkroy/ultimate-harness/v2.1.1/install.sh && \
 sh /tmp/install-harness2.sh
 ```
 
@@ -47,7 +47,7 @@ Install a release wheel into an isolated environment:
 
 ```sh
 python3 -m venv ~/.local/share/harness2/venv
-~/.local/share/harness2/venv/bin/python -m pip install /path/to/harness2-2.1.0-py3-none-any.whl
+~/.local/share/harness2/venv/bin/python -m pip install /path/to/harness2-2.1.1-py3-none-any.whl
 mkdir -p ~/.local/bin
 ln -sf ~/.local/share/harness2/venv/bin/harness ~/.local/bin/harness
 ```

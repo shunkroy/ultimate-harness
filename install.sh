@@ -2,9 +2,9 @@
 set -eu
 
 REPO="shunkroy/ultimate-harness"
-VERSION="2.1.0"
+VERSION="2.1.1"
 ASSET="harness2-${VERSION}-py3-none-any.whl"
-PINNED_SHA256="d7fe4ae5d7eeb0a8b6f0dc13843934420c56f00956b9354fa14a2491eb25fcfe"
+PINNED_SHA256="dc04ba18b166ba7783bcfc754cc0db4ca28cc79db919963fbc09268d21b84955"
 BASE_URL="${HARNESS_RELEASE_BASE_URL:-https://github.com/${REPO}/releases/download/v${VERSION}}"
 INSTALL_ROOT="${HARNESS_INSTALL_ROOT:-$HOME/.local/share/harness2}"
 VENV="$INSTALL_ROOT/venv"
