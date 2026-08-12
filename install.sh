@@ -85,11 +85,9 @@ PY
         python3 -m pip --disable-pip-version-check --no-input install \
             --root-user-action=ignore --no-deps --target "$VENV/site-packages" "$WORK/$ASSET"
         mkdir -p "$VENV/bin"
-        cat >"$VENV/bin/harness" <<'EOF'
+        cat >"$VENV/bin/harness" <<EOF
 #!/bin/sh
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-SITE_PACKAGES=$(dirname -- "$SCRIPT_DIR")/site-packages
-PYTHONPATH="$SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m harness2.cli "$@"
+PYTHONPATH='$VENV/site-packages' exec python3 -m harness2.cli "\$@"
 EOF
         chmod 0755 "$VENV/bin/harness"
     fi
@@ -100,11 +98,9 @@ else
     python3 -m pip --disable-pip-version-check --no-input install \
         --root-user-action=ignore --no-deps --upgrade --target "$VENV/site-packages" "$WORK/$ASSET"
     mkdir -p "$VENV/bin"
-    cat >"$VENV/bin/harness" <<'EOF'
+    cat >"$VENV/bin/harness" <<EOF
 #!/bin/sh
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-SITE_PACKAGES=$(dirname -- "$SCRIPT_DIR")/site-packages
-PYTHONPATH="$SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m harness2.cli "$@"
+PYTHONPATH='$VENV/site-packages' exec python3 -m harness2.cli "\$@"
 EOF
     chmod 0755 "$VENV/bin/harness"
 fi
