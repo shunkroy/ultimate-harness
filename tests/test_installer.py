@@ -25,7 +25,7 @@ class InstallerTests(unittest.TestCase):
         self.assertLess(checksum, install)
         self.assertIn("--proto '=https'", text)
         self.assertIn("--tlsv1.2", text)
-        self.assertIn('PINNED_SHA256="d57b35d76ad2c1187759c02c7e2074cdc445aa01903331478de24cc5086be19b"', text)
+        self.assertIn('PINNED_SHA256="d7fe4ae5d7eeb0a8b6f0dc13843934420c56f00956b9354fa14a2491eb25fcfe"', text)
 
     def test_installer_uses_isolated_venv_and_bounded_service(self):
         text = INSTALLER.read_text(encoding="utf-8")
