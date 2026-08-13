@@ -153,6 +153,11 @@ them and continues using the untouched legacy tables. No down-migration is
 required. Work submitted only to the new task engine will remain preserved but
 will not be processed by the old binary.
 
+Local rollback verification installed the public v2.1.1 wheel, opened state
+before and after v3 schema migration, verified the legacy audit chain, and
+observed both legacy and retained kernel tables. This is local integration
+evidence, not yet independent CI evidence.
+
 ## NEXT STEP
 
 1. Add encrypted immutable task payload references and task checkpoints.
