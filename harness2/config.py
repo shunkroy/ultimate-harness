@@ -102,6 +102,14 @@ class HarnessConfig:
         return self._join(str(self.state_root), "context-jobs")
 
     @property
+    def object_store_root(self) -> str:
+        return self._join(str(self.state_root), "objects")
+
+    @property
+    def object_store_key(self) -> str:
+        return self._join(str(self.state_root), "object-store.key")
+
+    @property
     def service_heartbeat(self) -> str:
         return self._join(str(self.state_root), "run", "service-heartbeat.json")
 
@@ -151,6 +159,7 @@ class HarnessConfig:
         ensure_private_dir(os.path.join(str(self.state_root), "logs"))
         ensure_private_dir(self.context_root)
         ensure_private_dir(self.context_jobs_dir)
+        ensure_private_dir(self.object_store_root)
 
     def secrets(self) -> Dict[str, str]:
         return secret_store.load(self.secrets_path, windows=self.platform.is_windows)

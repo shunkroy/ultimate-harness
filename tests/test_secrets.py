@@ -43,11 +43,15 @@ class SecretTests(unittest.TestCase):
                 home="C:/U", release="10",
             )
             config = HarnessConfig(
-                platform=p, state_root=os.path.join(tmp, "state"),
+                platform=p, state_root="C:/isolated-test-state",
                 opencode_bin="C:/x/opencode.cmd", prime_bin="C:/x/prime.cmd",
                 hermes_bin="C:/x/hermes.cmd", node_bin="C:/x/node.exe",
                 python_bin="C:/x/python.exe", openssl_bin=None, prime_repo="C:/Prime",
             )
+            # Exercise the Windows secret branch without allowing simulated
+            # Windows separators to create backslash-named POSIX artifacts.
+            object.__setattr__(config, "state_root", os.path.join(tmp, "state"))
+            object.__setattr__(config, "_join", lambda *parts: os.path.join(*parts))
             config.ensure()
             store = Store(config.database_path)
             manager = JobManager(config, store, FakeOrchestrator())

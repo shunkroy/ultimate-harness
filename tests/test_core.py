@@ -240,12 +240,17 @@ class CliTests(unittest.TestCase):
             config = HarnessConfig(state_root=state)
             config.ensure()
             store = Store(config.database_path)
-            engines = {}
-            orchestrator = unittest.mock.Mock()
+            app = unittest.mock.Mock()
+            app.config, app.store = config, store
+            app.context_jobs.return_value = unittest.mock.Mock()
+            app.context_jobs.return_value.submit.return_value = "a" * 32
             output = io.StringIO()
-            with patch("harness2.cli.runtime", return_value=(config, store, engines, orchestrator)), redirect_stdout(output):
+            with patch("harness2.cli.bootstrap", return_value=app), redirect_stdout(output):
                 code = main(["context", "submit", source, "--name", "CLI Context"])
             self.assertEqual(code, 0)
+            app.context_jobs.return_value.submit.assert_called_once_with(
+                source, name="CLI Context", version="0.1.0",
+            )
 
     def test_service_child_preserves_explicit_state_root(self):
         from harness2.cli import cmd_svc

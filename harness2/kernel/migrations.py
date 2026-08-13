@@ -176,6 +176,110 @@ MIGRATIONS: tuple[Migration, ...] = (
         """,
         "CREATE INDEX idx_kernel_resources_node_time ON kernel_resource_observations(node_id,observed_at)",
     )),
+    Migration(4, "immutable_payloads_checkpoints_and_snapshots", (
+        """
+        CREATE TABLE kernel_payload_references (
+          reference_id TEXT PRIMARY KEY,
+          backend_id TEXT NOT NULL,
+          object_key TEXT NOT NULL,
+          content_sha256 TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
+          media_type TEXT NOT NULL,
+          schema_id TEXT NOT NULL,
+          purpose TEXT NOT NULL,
+          envelope_version INTEGER NOT NULL CHECK(envelope_version > 0),
+          key_id TEXT NOT NULL,
+          reference_mac TEXT NOT NULL,
+          created_at REAL NOT NULL,
+          UNIQUE(backend_id, object_key)
+        )
+        """,
+        """
+        CREATE TABLE kernel_task_payload_bindings (
+          task_id TEXT NOT NULL REFERENCES kernel_tasks(task_id),
+          role TEXT NOT NULL,
+          reference_id TEXT NOT NULL REFERENCES kernel_payload_references(reference_id),
+          bound_at REAL NOT NULL,
+          PRIMARY KEY(task_id, role)
+        )
+        """,
+        "CREATE INDEX idx_kernel_payload_bindings_ref ON kernel_task_payload_bindings(reference_id)",
+        """
+        CREATE TABLE kernel_task_checkpoints (
+          checkpoint_id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES kernel_tasks(task_id),
+          attempt_id TEXT NOT NULL REFERENCES kernel_task_attempts(attempt_id),
+          fence_token INTEGER NOT NULL CHECK(fence_token > 0),
+          checkpoint_seq INTEGER NOT NULL CHECK(checkpoint_seq > 0),
+          workflow_step TEXT NOT NULL,
+          resource_versions_json TEXT NOT NULL,
+          reference_id TEXT NOT NULL REFERENCES kernel_payload_references(reference_id),
+          parent_checkpoint_hash TEXT NOT NULL,
+          integrity_hash TEXT NOT NULL,
+          resumable INTEGER NOT NULL CHECK(resumable IN (0,1)),
+          schema_version INTEGER NOT NULL CHECK(schema_version > 0),
+          created_at REAL NOT NULL,
+          event_id TEXT NOT NULL UNIQUE REFERENCES kernel_events(event_id),
+          UNIQUE(task_id, checkpoint_seq),
+          UNIQUE(attempt_id, checkpoint_seq)
+        )
+        """,
+        "CREATE INDEX idx_kernel_checkpoints_task_seq ON kernel_task_checkpoints(task_id,checkpoint_seq DESC)",
+        """
+        CREATE TABLE kernel_source_snapshots (
+          snapshot_id TEXT PRIMARY KEY,
+          reference_id TEXT NOT NULL UNIQUE REFERENCES kernel_payload_references(reference_id),
+          source_type TEXT NOT NULL,
+          source_identifier_hash TEXT NOT NULL,
+          source_revision TEXT,
+          content_sha256 TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
+          media_type TEXT NOT NULL,
+          metadata_json TEXT NOT NULL,
+          captured_at REAL NOT NULL
+        )
+        """,
+        "CREATE INDEX idx_kernel_snapshots_content ON kernel_source_snapshots(content_sha256)",
+        """
+        CREATE TABLE kernel_task_type_snapshots (
+          task_id TEXT PRIMARY KEY REFERENCES kernel_tasks(task_id),
+          task_type TEXT NOT NULL,
+          descriptor_version INTEGER NOT NULL CHECK(descriptor_version > 0),
+          descriptor_sha256 TEXT NOT NULL,
+          resource_requirements_json TEXT NOT NULL,
+          side_effect_class TEXT NOT NULL,
+          resumable INTEGER NOT NULL CHECK(resumable IN (0,1))
+        )
+        """,
+        """
+        CREATE TABLE kernel_legacy_job_tasks (
+          job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+          task_id TEXT NOT NULL UNIQUE REFERENCES kernel_tasks(task_id),
+          payload_reference_id TEXT NOT NULL REFERENCES kernel_payload_references(reference_id),
+          latest_attempt_id TEXT,
+          latest_fence_token INTEGER,
+          projection_revision INTEGER NOT NULL DEFAULT 0,
+          created_at REAL NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE kernel_provenance_observations (
+          observation_id TEXT PRIMARY KEY,
+          subject_kind TEXT NOT NULL,
+          subject_id TEXT NOT NULL,
+          subject_sha256 TEXT NOT NULL,
+          producer_identity TEXT NOT NULL,
+          verification_method TEXT NOT NULL,
+          verification_status TEXT NOT NULL,
+          signature_metadata_json TEXT NOT NULL,
+          evidence_reference_id TEXT REFERENCES kernel_payload_references(reference_id),
+          observed_at REAL NOT NULL,
+          expires_at REAL,
+          event_id TEXT UNIQUE REFERENCES kernel_events(event_id)
+        )
+        """,
+        "CREATE INDEX idx_kernel_provenance_subject ON kernel_provenance_observations(subject_kind,subject_id,observed_at DESC)",
+    )),
 )
 
 

@@ -8,11 +8,20 @@ from .contracts import (
     SkillPromotionDecision,
     SkillState,
     SkillTest,
+    VerifiedSkillEvidence,
 )
 from .foundry import SkillFoundry, SkillNotFound, SkillPromotionDenied
+from .provenance import (
+    LocalHMACProducerVerifier, ProvenanceError, ProvenanceObservation,
+    ProvenanceRepository, ProvenanceVerification, SignedStatement,
+    VerificationStatus,
+)
 
 __all__ = [
     "SkillCapability", "SkillDescriptor", "SkillEvidence", "SkillFoundry",
     "SkillManifest", "SkillNotFound", "SkillPromotionDecision",
-    "SkillPromotionDenied", "SkillState", "SkillTest",
+    "SkillPromotionDenied", "SkillState", "SkillTest", "VerifiedSkillEvidence",
+    "LocalHMACProducerVerifier", "ProvenanceError", "ProvenanceObservation",
+    "ProvenanceRepository", "ProvenanceVerification", "SignedStatement",
+    "VerificationStatus",
 ]

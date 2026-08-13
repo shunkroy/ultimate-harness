@@ -29,7 +29,6 @@ from . import supervisor
 from .capabilities import registry as capability_registry
 from .service import ServiceLoop, active_status, service_process_matches
 from .context import ContextCompiler, ContextPackage, ContextRuntime
-from .context.jobs import ContextJobManager
 from .discovery import discover
 from .kernel.catalog import build_catalog
 from .bootstrap import bootstrap
@@ -348,13 +347,10 @@ def cmd_providers(args) -> int:
     return 0
 
 
-def _context_manager(config, store) -> ContextJobManager:
-    return ContextJobManager(config, store)
-
-
 def cmd_context(args) -> int:
-    config, store, _, _ = globals()["runtime"]()
-    manager = _context_manager(config, store)
+    app = bootstrap()
+    config, store = app.config, app.store
+    manager = app.context_jobs()
     if args.action == "compile":
         compiled = ContextCompiler().compile_file(args.source, name=args.name, version=args.version)
         destination = args.output or os.path.join(config.context_root, compiled.ir.context_id)
@@ -765,7 +761,7 @@ def cmd_supervise(args) -> int:
     supervisor.write_pidfile(pidfile, os.getpid())
     try:
         ServiceLoop.bootstrap(
-            config, store, prime, manager, ContextJobManager(config, store),
+            config, store, prime, manager, app.context_jobs(),
             interval=args.interval,
         ).run()
     finally:

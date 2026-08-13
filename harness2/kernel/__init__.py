@@ -26,6 +26,23 @@ from .tasks import (
 )
 from .provider_intelligence import CapabilityScore, ProviderIntelligence, ProviderObservation
 from .resources import ResourceAction, ResourceDecision, ResourceGovernor, ResourceLimits, ResourceObservation
+from .payloads import (
+    AuthenticatedStorage,
+    CheckpointReference,
+    PayloadError,
+    PayloadIntegrityError,
+    PayloadReference,
+    TaskPayload,
+)
+from .task_types import (
+    SideEffectClass,
+    TaskResourceRequirements,
+    TaskTypeDescriptor,
+    TaskTypeRegistry,
+    UnknownTaskType,
+    default_task_types,
+)
+from .execution_state import ExecutionStateRepository, SourceSnapshot
 from .registry import CapabilityRegistry, RuntimeRegistry
 from .catalog import build_catalog, runtime_from_engine
 
@@ -39,6 +56,11 @@ __all__ = [
     "CapabilityScore", "ProviderIntelligence", "ProviderObservation",
     "ResourceAction", "ResourceDecision", "ResourceGovernor", "ResourceLimits",
     "ResourceObservation",
+    "AuthenticatedStorage", "CheckpointReference", "PayloadError",
+    "PayloadIntegrityError", "PayloadReference", "TaskPayload",
+    "SideEffectClass", "TaskResourceRequirements", "TaskTypeDescriptor",
+    "TaskTypeRegistry", "UnknownTaskType", "default_task_types",
+    "ExecutionStateRepository", "SourceSnapshot",
     "RuntimeRegistry", "SchemaTooNewError", "StaleLeaseError",
     "TaskIdempotencyConflict", "TaskRecord", "TaskRepository", "TaskState",
     "TypedEvent",

@@ -157,3 +157,31 @@ class SkillPromotionDecision:
     to_state: SkillState
     reasons: tuple[str, ...]
     evidence_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class VerifiedSkillEvidence:
+    evidence: SkillEvidence
+    verification_status: str
+    verification_method: str
+    authenticated_producer_id: str
+    trust_domain: str
+    statement_hash: str
+    artifact_sha256: str
+    evidence_kind: str
+    expires_at: Optional[float] = None
+    test_only: bool = False
+
+    def __post_init__(self) -> None:
+        if self.verification_status not in {"verified", "test_only"}:
+            raise SkillContractError("verified evidence has an unsupported status")
+        if not self.verification_method.strip() or not self.authenticated_producer_id.strip():
+            raise SkillContractError("verified evidence requires authenticated producer metadata")
+        if len(self.statement_hash) != 64 or any(
+            char not in "0123456789abcdef" for char in self.statement_hash
+        ):
+            raise SkillContractError("verified evidence statement_hash must be SHA-256")
+        if self.artifact_sha256 != self.evidence.artifact_hash:
+            raise SkillContractError("verified evidence artifact identity mismatch")
+        if self.evidence_kind != self.evidence.kind:
+            raise SkillContractError("verified evidence kind mismatch")

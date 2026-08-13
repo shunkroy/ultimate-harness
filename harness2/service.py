@@ -40,7 +40,7 @@ class ServiceLoop:
     store: Store
     prime: PrimeAdapter
     jobs: JobManager
-    context_jobs: Optional[ContextJobManager] = None
+    context_jobs: ContextJobManager = None  # type: ignore[assignment]
     tasks: Optional[TaskRepository] = None
     interval: int = 30
     running: bool = True

@@ -28,4 +28,4 @@ Issues = "https://github.com/shunkroy/ultimate-harness/issues"
 harness = "harness2.cli:main"
 
 [tool.setuptools]
-packages = ["harness2", "harness2.adapters", "harness2.kernel", "harness2.context", "harness2.skills"]
+packages = ["harness2", "harness2.adapters", "harness2.kernel", "harness2.context", "harness2.skills", "harness2.storage", "harness2.sandbox"]

@@ -15,6 +15,7 @@ from harness2.skills import (
     SkillPromotionDenied,
     SkillState,
     SkillTest,
+    VerifiedSkillEvidence,
 )
 from harness2.skills.contracts import SkillContractError
 
@@ -29,6 +30,25 @@ def manifest(**overrides):
     }
     values.update(overrides)
     return SkillManifest(**values)
+
+
+def verified(items):
+    return tuple(
+        VerifiedSkillEvidence(
+            item, "verified", "hmac-sha256-local/v1", item.producer_id,
+            "local", (str(index + 1) * 64)[:64], item.artifact_hash,
+            item.kind, None, False,
+        )
+        for index, item in enumerate(items)
+    )
+
+
+class TrustedProvenanceStub:
+    def __init__(self, values):
+        self.values = set(item.statement_hash for item in values)
+
+    def validate_skill_evidence(self, item, **_):
+        return item.statement_hash in self.values
 
 
 class SkillContractTests(unittest.TestCase):
@@ -59,7 +79,11 @@ class SkillContractTests(unittest.TestCase):
         )
         tested = (SkillTest("unit", True, "e" * 64),)
         descriptor = SkillDescriptor(value, SkillState.APPROVED, evidence, tested, activated=False)
-        active = SkillFoundry.promote(descriptor, SkillState.ACTIVE)
+        values = verified(evidence)
+        active = SkillFoundry.promote(
+            descriptor, SkillState.ACTIVE, verified_evidence=values,
+            provenance=TrustedProvenanceStub(values),
+        )
         self.assertEqual(active.state, SkillState.ACTIVE)
         self.assertTrue(active.activated)
 
@@ -73,6 +97,20 @@ class SkillContractTests(unittest.TestCase):
             SkillEvidence("sandbox", "sandbox", "b" * 64, "now", subject_hash=value.manifest_hash, producer_id="sandbox"),
             SkillEvidence("test", "test", "c" * 64, "now", subject_hash=value.manifest_hash, producer_id="test"),
             SkillEvidence("approval", "approval", "d" * 64, "now", subject_hash=value.manifest_hash, producer_id=value.created_by),
+        )
+        descriptor = SkillDescriptor(
+            value, SkillState.APPROVED, evidence,
+            (SkillTest("unit", True, "e" * 64),), activated=False,
+        )
+        with self.assertRaises(SkillPromotionDenied):
+            SkillFoundry.promote(descriptor, SkillState.ACTIVE)
+
+    def test_descriptive_producer_labels_are_not_authenticated(self):
+        value = manifest()
+        evidence = (
+            SkillEvidence("sandbox", "sandbox", "b" * 64, "now", subject_hash=value.manifest_hash, producer_id="sandbox"),
+            SkillEvidence("test", "test", "c" * 64, "now", subject_hash=value.manifest_hash, producer_id="test"),
+            SkillEvidence("approval", "approval", "d" * 64, "now", subject_hash=value.manifest_hash, producer_id="governor"),
         )
         descriptor = SkillDescriptor(
             value, SkillState.APPROVED, evidence,

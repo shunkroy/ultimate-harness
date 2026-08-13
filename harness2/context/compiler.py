@@ -69,6 +69,23 @@ class CompiledContext:
 class ContextCompiler:
     VERSION = "0.1.0"
 
+    def compile_bytes(
+        self, raw: bytes, *, name: str, version: str = "0.1.0",
+        source_name: str = "source.txt",
+    ) -> CompiledContext:
+        if not isinstance(raw, bytes):
+            raise CompileError("context source must be bytes")
+        if len(raw) > 10 * 1024 * 1024:
+            raise CompileError("context source exceeds the v1 10 MiB limit")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise CompileError("context source must be UTF-8 text") from exc
+        compiled = self.compile_text(
+            text, name=name, version=version, source_name=source_name,
+        )
+        return CompiledContext(compiled.ir, raw)
+
     def compile_text(self, text: str, *, name: str, version: str = "0.1.0", source_name: str = "source.txt") -> CompiledContext:
         if not isinstance(text, str) or not text.strip():
             raise CompileError("context source is empty")
@@ -131,18 +148,41 @@ class ContextCompiler:
 
     def compile_file(self, path: str, *, name: Optional[str] = None, version: str = "0.1.0") -> CompiledContext:
         absolute = os.path.abspath(os.path.expanduser(path))
-        st = os.lstat(absolute)
-        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
-            raise CompileError("context source must be a regular non-symlink file")
-        with open(absolute, "rb") as fh:
-            raw = fh.read()
-        if len(raw) > 10 * 1024 * 1024:
-            raise CompileError("context source exceeds the v1 10 MiB limit")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise CompileError("context source must be UTF-8 text") from exc
-        return self.compile_text(
-            text, name=name or Path(absolute).stem, version=version,
+            fd = os.open(absolute, flags)
+        except OSError as exc:
+            raise CompileError("context source could not be opened safely") from exc
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode):
+                raise CompileError("context source must be a regular non-symlink file")
+
+            def read_once() -> bytes:
+                os.lseek(fd, 0, os.SEEK_SET)
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    chunk = os.read(fd, min(1024 * 1024, 10 * 1024 * 1024 + 1 - total))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > 10 * 1024 * 1024:
+                        raise CompileError("context source exceeds the v1 10 MiB limit")
+                return b"".join(chunks)
+
+            raw = read_once()
+            if read_once() != raw:
+                raise CompileError("context source changed while it was read")
+            after = os.fstat(fd)
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+            ):
+                raise CompileError("context source changed while it was read")
+        finally:
+            os.close(fd)
+        return self.compile_bytes(
+            raw, name=name or Path(absolute).stem, version=version,
             source_name=os.path.basename(absolute),
         )

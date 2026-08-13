@@ -7,6 +7,7 @@ import os
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -27,6 +28,7 @@ from harness2.kernel.tasks import (
     TaskState,
 )
 from harness2.store import SCHEMA, Store
+from harness2.config import HarnessConfig
 
 
 class KernelStateCase(unittest.TestCase):
@@ -81,6 +83,47 @@ class MigrationTests(KernelStateCase):
         self.assertEqual(con.execute("SELECT value FROM settings WHERE key='legacy'").fetchone()[0], "preserve")
         self.assertEqual(con.execute("PRAGMA quick_check").fetchone()[0], "ok")
         con.close()
+
+    def test_legacy_mapping_cascades_for_v211_purge_compatibility(self):
+        from harness2.kernel.execution_state import ExecutionStateRepository
+        from harness2.kernel.payloads import TaskPayload
+        from harness2.kernel.task_types import default_task_types
+        from harness2.storage import LocalAuthenticatedStorage
+
+        config = HarnessConfig(state_root=os.path.dirname(self.path))
+        config.ensure()
+        state = ExecutionStateRepository(
+            self.store, self.events, self.tasks,
+            LocalAuthenticatedStorage(
+                config.object_store_root, config.object_store_key,
+                openssl_bin=config.openssl_bin,
+            ), default_task_types(),
+        )
+        job_id = "legacy-cascade"
+        now = time.time()
+        with self.store.connect() as con:
+            con.execute(
+                "INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (job_id, now, now, "queued", "a" * 64, "/tmp/none", "opencode",
+                 None, None, None, 1, None, 0, 0, 0, 0, 0, 1, now,
+                 None, None, None, None, None),
+            )
+        task, reference = state.create_task(
+            TaskPayload(
+                "legacy.run/v1", "x",
+                constraints={"required_capabilities": []},
+            ), task_id="legacy-cascade-task",
+        )
+        with self.store.connect() as con:
+            con.execute(
+                "INSERT INTO kernel_legacy_job_tasks("
+                "job_id,task_id,payload_reference_id,projection_revision,created_at) "
+                "VALUES(?,?,?,?,?)", (job_id, task.task_id, reference.reference_id, 0, now),
+            )
+            con.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+            self.assertIsNone(con.execute(
+                "SELECT 1 FROM kernel_legacy_job_tasks WHERE job_id=?", (job_id,),
+            ).fetchone())
 
     def test_migration_is_idempotent_and_detects_drift_and_newer_schema(self):
         migrator = Migrator(self.path)
@@ -260,11 +303,24 @@ class TaskStateTests(KernelStateCase):
             worker.join()
         self.assertEqual(sum(value is not None for value in outcomes), 1)
 
+    def test_retry_claim_honors_next_run_at(self):
+        self.tasks.submit(self.request(), idempotency_key="scheduled", max_attempts=2, now=10)
+        self.tasks.prepare("task-1", now=10)
+        lease = self.tasks.claim("task-1", self.plan(), owner_id="worker", now=10)
+        self.tasks.complete(
+            lease, success=False, outcome_hash="failed", error_code="timeout",
+            retryable=True, retry_at=20, now=11,
+        )
+        with self.assertRaises(InvalidTransition):
+            self.tasks.claim("task-1", self.plan(), owner_id="early", now=19)
+        claimed = self.tasks.claim("task-1", self.plan(), owner_id="ready", now=20)
+        self.assertEqual(claimed.attempt_no, 2)
+
     def test_cancel_active_task_fences_completion(self):
         self.tasks.submit(self.request(), idempotency_key="cancel")
         self.tasks.prepare("task-1")
         lease = self.tasks.claim("task-1", self.plan(), owner_id="worker")
-        cancelled = self.tasks.cancel("task-1")
+        cancelled = self.tasks.cancel("task-1", lease=lease)
         self.assertEqual(cancelled.state, TaskState.CANCELLED)
         with self.assertRaises(StaleLeaseError):
             self.tasks.complete(lease, success=True, outcome_hash="late")

@@ -183,6 +183,11 @@ class TaskRepository:
             row = con.execute("SELECT * FROM kernel_tasks WHERE task_id=?", (task_id,)).fetchone()
         return self._from_row(row) if row else None
 
+    @staticmethod
+    def _get(con: sqlite3.Connection, task_id: str) -> Optional[TaskRecord]:
+        row = con.execute("SELECT * FROM kernel_tasks WHERE task_id=?", (task_id,)).fetchone()
+        return TaskRepository._from_row(row) if row else None
+
     def list(self, *, state: TaskState | None = None, limit: int = 100) -> tuple[TaskRecord, ...]:
         query = "SELECT * FROM kernel_tasks"
         values: list[Any] = []
@@ -202,6 +207,22 @@ class TaskRepository:
         max_attempts: int = 1, now: float | None = None,
     ) -> TaskRecord:
         timestamp = time.time() if now is None else float(now)
+        with self.store.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            return self._submit(
+                con, request, task_type=task_type, source=source, reason=reason,
+                priority=priority, authority=authority, idempotency_key=idempotency_key,
+                max_attempts=max_attempts, now=timestamp,
+            )
+
+    def _submit(
+        self, con: sqlite3.Connection, request: ExecutionRequest, *,
+        task_type: str = "execution", source: str = "user",
+        reason: str = "explicit request", priority: int = 0,
+        authority: str = "user", idempotency_key: str | None = None,
+        max_attempts: int = 1, now: float,
+    ) -> TaskRecord:
+        timestamp = float(now)
         request_hash = execution_request_hash(request)
         submission_hash = hashlib.sha256(canonical_json({
             "request_hash": request_hash,
@@ -213,61 +234,54 @@ class TaskRepository:
             "max_attempts": max(1, int(max_attempts)),
         }).encode("utf-8")).hexdigest()
         objective_hash = hashlib.sha256(request.objective.encode("utf-8", "surrogatepass")).hexdigest()
-        with self.store.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            existing_id = con.execute(
-                "SELECT * FROM kernel_tasks WHERE task_id=?", (request.task_id,),
+        existing_id = con.execute(
+            "SELECT * FROM kernel_tasks WHERE task_id=?", (request.task_id,),
+        ).fetchone()
+        if existing_id:
+            value = self._from_row(existing_id)
+            if value.request_hash == submission_hash and value.idempotency_key == idempotency_key:
+                return value
+            raise TaskIdempotencyConflict("task identity already has a different request")
+        if idempotency_key:
+            existing = con.execute(
+                "SELECT * FROM kernel_tasks WHERE idempotency_key=?", (idempotency_key,),
             ).fetchone()
-            if existing_id:
-                value = self._from_row(existing_id)
-                if value.request_hash == submission_hash and value.idempotency_key == idempotency_key:
-                    return value
-                raise TaskIdempotencyConflict("task identity already has a different request")
-            if idempotency_key:
-                existing = con.execute(
-                    "SELECT * FROM kernel_tasks WHERE idempotency_key=?", (idempotency_key,),
-                ).fetchone()
-                if existing:
-                    value = self._from_row(existing)
-                    if value.request_hash != submission_hash or value.task_id != request.task_id:
-                        raise TaskIdempotencyConflict("idempotency key has a different request")
-                    return value
-            con.execute(
-                "INSERT INTO kernel_tasks("
-                "task_id,schema_version,task_type,state,source,reason,priority,authority,"
-                "objective_hash,request_hash,idempotency_key,required_capabilities_json,constraints_json,"
-                "budget_json,preferred_runtime,max_attempts,attempts_started,current_fence,"
-                "active_attempt_id,next_run_at,result_hash,error_code,created_at,updated_at,"
-                "terminal_at,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    request.task_id, 1, task_type, TaskState.CREATED.value, source, reason,
-                    int(priority), authority, objective_hash, submission_hash, idempotency_key,
-                    canonical_json({"values": list(request.required_capabilities)}),
-                    canonical_json(request.constraints), canonical_json(request.budget),
-                    request.preferred_runtime, max(1, int(max_attempts)), 0, 0, None,
-                    timestamp, None, None, timestamp, timestamp, None, 0,
-                ),
-            )
-            # Store capability arrays as arrays, while using canonical validation above.
-            con.execute(
-                "UPDATE kernel_tasks SET required_capabilities_json=? WHERE task_id=?",
-                (json.dumps(list(request.required_capabilities), separators=(",", ":")), request.task_id),
-            )
-            event = self.events.append(TypedEvent(
-                event_type="task.created", source="kernel.tasks", task_id=request.task_id,
-                correlation_id=request.task_id, dedup_key=f"{request.task_id}:created",
-                payload={
-                    "task_type": task_type, "state": TaskState.CREATED.value,
-                    "objective_hash": objective_hash, "request_hash": submission_hash,
-                    "priority": int(priority), "authority": authority,
-                },
-            ), connection=con)
-            self._record_transition(
-                con, request.task_id, None, None, TaskState.CREATED,
-                "submitted", event.event_id, timestamp, 0,
-            )
-            row = con.execute("SELECT * FROM kernel_tasks WHERE task_id=?", (request.task_id,)).fetchone()
-            return self._from_row(row)
+            if existing:
+                value = self._from_row(existing)
+                if value.request_hash != submission_hash or value.task_id != request.task_id:
+                    raise TaskIdempotencyConflict("idempotency key has a different request")
+                return value
+        con.execute(
+            "INSERT INTO kernel_tasks("
+            "task_id,schema_version,task_type,state,source,reason,priority,authority,"
+            "objective_hash,request_hash,idempotency_key,required_capabilities_json,constraints_json,"
+            "budget_json,preferred_runtime,max_attempts,attempts_started,current_fence,"
+            "active_attempt_id,next_run_at,result_hash,error_code,created_at,updated_at,"
+            "terminal_at,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                request.task_id, 1, task_type, TaskState.CREATED.value, source, reason,
+                int(priority), authority, objective_hash, submission_hash, idempotency_key,
+                json.dumps(list(request.required_capabilities), separators=(",", ":")),
+                canonical_json(request.constraints), canonical_json(request.budget),
+                request.preferred_runtime, max(1, int(max_attempts)), 0, 0, None,
+                timestamp, None, None, timestamp, timestamp, None, 0,
+            ),
+        )
+        event = self.events.append(TypedEvent(
+            event_type="task.created", source="kernel.tasks", task_id=request.task_id,
+            correlation_id=request.task_id, dedup_key=f"{request.task_id}:created",
+            payload={
+                "task_type": task_type, "state": TaskState.CREATED.value,
+                "objective_hash": objective_hash, "request_hash": submission_hash,
+                "priority": int(priority), "authority": authority,
+            },
+        ), connection=con)
+        self._record_transition(
+            con, request.task_id, None, None, TaskState.CREATED,
+            "submitted", event.event_id, timestamp, 0,
+        )
+        row = con.execute("SELECT * FROM kernel_tasks WHERE task_id=?", (request.task_id,)).fetchone()
+        return self._from_row(row)
 
     @staticmethod
     def _record_transition(
@@ -330,19 +344,34 @@ class TaskRepository:
             con.execute("BEGIN IMMEDIATE")
             return apply(con)
 
-    def prepare(self, task_id: str, *, now: float | None = None) -> TaskRecord:
-        task = self.get(task_id)
+    def prepare(
+        self, task_id: str, *, now: float | None = None,
+        connection: sqlite3.Connection | None = None,
+    ) -> TaskRecord:
+        task = self._get(connection, task_id) if connection is not None else self.get(task_id)
         if not task:
             raise TaskError(f"unknown task: {task_id}")
         if task.state == TaskState.CREATED:
-            task = self.transition(task_id, TaskState.PLANNED, reason_code="plan.created", now=now)
+            task = self.transition(
+                task_id, TaskState.PLANNED, reason_code="plan.created", now=now,
+                connection=connection,
+            )
         if task.state == TaskState.PLANNED:
-            task = self.transition(task_id, TaskState.READY, reason_code="plan.ready", now=now)
+            task = self.transition(
+                task_id, TaskState.READY, reason_code="plan.ready", now=now,
+                connection=connection,
+            )
         if task.state == TaskState.BLOCKED:
-            task = self.transition(task_id, TaskState.READY, reason_code="plan.recheck", now=now)
+            task = self.transition(
+                task_id, TaskState.READY, reason_code="plan.recheck", now=now,
+                connection=connection,
+            )
         return task
 
-    def cancel(self, task_id: str, *, now: float | None = None) -> TaskRecord:
+    def cancel(
+        self, task_id: str, *, lease: AttemptLease | None = None,
+        now: float | None = None,
+    ) -> TaskRecord:
         timestamp = time.time() if now is None else float(now)
         with self.store.connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -355,6 +384,9 @@ class TaskRepository:
             if TaskState.CANCELLED not in ALLOWED_TRANSITIONS[task.state]:
                 raise InvalidTransition(f"{task.state.value} -> cancelled is not allowed")
             if task.active_attempt_id:
+                if lease is None:
+                    raise StaleLeaseError("running task cancellation requires its active fenced lease")
+                self._verify_lease(con, lease, now=timestamp)
                 con.execute(
                     "UPDATE kernel_task_attempts SET state='cancelled',finished_at=?,error_code=? "
                     "WHERE attempt_id=? AND state='running'",
@@ -377,6 +409,20 @@ class TaskRepository:
             )
             row = con.execute("SELECT * FROM kernel_tasks WHERE task_id=?", (task_id,)).fetchone()
             return self._from_row(row)
+
+    def fail(
+        self, lease: AttemptLease, *, error_code: str,
+        retryable: bool = False, retry_at: float | None = None,
+        now: float | None = None,
+    ) -> TaskRecord:
+        return self.complete(
+            lease, success=False,
+            outcome_hash=hashlib.sha256(
+                f"failure:{error_code}".encode("utf-8")
+            ).hexdigest(),
+            error_code=error_code, retryable=retryable,
+            retry_at=retry_at, now=now,
+        )
 
     def retry(self, task_id: str, *, now: float | None = None) -> TaskRecord:
         timestamp = time.time() if now is None else float(now)
@@ -411,17 +457,20 @@ class TaskRepository:
     def claim(
         self, task_id: str, plan: ExecutionPlan, *, owner_id: str,
         lease_seconds: int = 600, now: float | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> AttemptLease:
         timestamp = time.time() if now is None else float(now)
         plan_json = canonical_json(_plan_dict(plan))
-        with self.store.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
+
+        def apply(con: sqlite3.Connection) -> AttemptLease:
             row = con.execute("SELECT * FROM kernel_tasks WHERE task_id=?", (task_id,)).fetchone()
             if not row:
                 raise TaskError(f"unknown task: {task_id}")
             task = self._from_row(row)
             if task.state not in {TaskState.READY, TaskState.RETRYING, TaskState.RECOVERING}:
                 raise InvalidTransition(f"task is not claimable from {task.state.value}")
+            if task.next_run_at > timestamp:
+                raise InvalidTransition("task is not scheduled to run yet")
             if task.attempts_started >= task.max_attempts:
                 raise InvalidTransition("task attempt budget is exhausted")
             attempt_no = task.attempts_started + 1
@@ -464,10 +513,16 @@ class TaskRepository:
                 con, task_id, attempt_id, task.state, TaskState.RUNNING,
                 "attempt.started", event.event_id, timestamp, revision,
             )
-        return AttemptLease(
-            attempt_id, task_id, attempt_no, fence, owner_id,
-            lease_until, plan.runtime_id, plan,
-        )
+            return AttemptLease(
+                attempt_id, task_id, attempt_no, fence, owner_id,
+                lease_until, plan.runtime_id, plan,
+            )
+
+        if connection is not None:
+            return apply(connection)
+        with self.store.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            return apply(con)
 
     def _verify_lease(
         self, con: sqlite3.Connection, lease: AttemptLease, *, now: float,
@@ -525,10 +580,11 @@ class TaskRepository:
         self, lease: AttemptLease, *, success: bool, outcome_hash: str,
         error_code: str | None = None, retryable: bool = False,
         retry_at: float | None = None, now: float | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> TaskRecord:
         timestamp = time.time() if now is None else float(now)
-        with self.store.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
+
+        def apply(con: sqlite3.Connection) -> TaskRecord:
             task, _ = self._verify_lease(con, lease, now=timestamp)
             if success:
                 target = TaskState.COMPLETED
@@ -572,6 +628,12 @@ class TaskRepository:
             row = con.execute("SELECT * FROM kernel_tasks WHERE task_id=?", (task.task_id,)).fetchone()
             return self._from_row(row)
 
+        if connection is not None:
+            return apply(connection)
+        with self.store.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            return apply(con)
+
     def recover_expired(self, *, now: float | None = None, limit: int = 100) -> int:
         timestamp = time.time() if now is None else float(now)
         recovered = 0
@@ -582,6 +644,7 @@ class TaskRepository:
                 "FROM kernel_task_attempts a JOIN kernel_tasks t ON t.task_id=a.task_id "
                 "WHERE a.state='running' AND a.lease_until<? AND t.state='running' "
                 "AND t.active_attempt_id=a.attempt_id AND t.current_fence=a.fence_token "
+                "AND NOT EXISTS(SELECT 1 FROM kernel_legacy_job_tasks m WHERE m.task_id=t.task_id) "
                 "ORDER BY a.lease_until LIMIT ?",
                 (timestamp, max(1, min(int(limit), 1000))),
             ).fetchall()
