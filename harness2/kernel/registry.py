@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, Optional, Protocol
 
-from .contracts import CapabilityDescriptor, RuntimeDescriptor
+from .contracts import CapabilityDescriptor, ExecutionOutcome, ExecutionPlan, ExecutionRequest, RuntimeDescriptor
 
 
 class RegistryConflict(ValueError):
@@ -13,6 +13,7 @@ class RegistryConflict(ValueError):
 
 class RuntimeDriver(Protocol):
     def descriptor(self) -> RuntimeDescriptor: ...
+    def execute(self, request: ExecutionRequest, plan: ExecutionPlan) -> ExecutionOutcome: ...
 
 
 class RuntimeRegistry:

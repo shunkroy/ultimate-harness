@@ -83,6 +83,15 @@ class Store:
                 os.chmod(self.path + suffix, PRIVATE_FILE_MODE)
             except (FileNotFoundError, OSError):
                 pass  # SQLite may remove WAL/SHM between close and chmod.
+        # Kernel state is additive and versioned independently from legacy
+        # import markers. Import locally to keep Store usable by v2 readers.
+        from .kernel.migrations import Migrator
+        Migrator(self.path).migrate()
+
+    def schema_version(self) -> int:
+        from .kernel.migrations import Migrator
+        with self.connect() as con:
+            return Migrator(self.path).verify(con)
 
     def setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
         with self.connect() as con:
@@ -102,6 +111,7 @@ class Store:
         payload = json.dumps(safe, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         now = time.time()
         with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
             row = con.execute("SELECT entry_hash FROM audit ORDER BY seq DESC LIMIT 1").fetchone()
             prev = str(row[0]) if row else "0" * 64
             body = f"{now:.6f}|{event}|{subject}|{payload}|{prev}"
@@ -132,7 +142,9 @@ class Store:
         detail = redact(result.error or "", 300)
         with self.connect() as con:
             con.execute(
-                "INSERT INTO runs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO runs(id,started_at,finished_at,task_hash,engine,agent,model,provider,"
+                "status,exit_code,duration_ms,session_id,error_code,detail) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run_id, started, finished, task_hash(request.prompt), result.engine,
                     decision.agent, decision.model, request.provider,

@@ -16,6 +16,8 @@ from .jobs import JobManager
 from .security import atomic_write_json, ensure_private_dir, read_private_json, redact
 from .store import Store
 from . import supervisor
+from .kernel.event_bus import EventBus
+from .kernel.tasks import TaskRepository
 
 
 def rotate(path: str, max_bytes: int = 5 * 1024 * 1024, keep: int = 3) -> bool:
@@ -39,6 +41,7 @@ class ServiceLoop:
     prime: PrimeAdapter
     jobs: JobManager
     context_jobs: Optional[ContextJobManager] = None
+    tasks: Optional[TaskRepository] = None
     interval: int = 30
     running: bool = True
     boot_id: str = ""
@@ -47,6 +50,8 @@ class ServiceLoop:
     def __post_init__(self) -> None:
         if self.context_jobs is None:
             self.context_jobs = ContextJobManager(self.config, self.store)
+        if self.tasks is None:
+            self.tasks = TaskRepository(self.store, EventBus(self.store))
         if not self.boot_id:
             self.boot_id = uuid.uuid4().hex
 
@@ -90,9 +95,10 @@ class ServiceLoop:
                             delay = min(300, 2 ** min(failures, 8))
                             next_prime_attempt = now + delay
                             self.store.append_audit("service.prime.failed", "prime", {"backoff": delay, "error": exc})
+                recovered = self.tasks.recover_expired(now=now) if self.tasks else 0
                 result = self.jobs.work_once()
-                work_type = "run_job" if result else None
-                work_id = result["id"] if result else None
+                work_type = "task_recovery" if recovered else ("run_job" if result else None)
+                work_id = str(recovered) if recovered else (result["id"] if result else None)
                 if result:
                     self.store.append_audit("service.job.worked", result["id"], {"status": result["status"]})
                 context_result = self.context_jobs.work_once() if self.context_jobs else None

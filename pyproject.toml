@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harness2"
-version = "2.1.1"
+version = "3.0.0.dev1"
 description = "Provider-independent agent harness with executable context runtime"
 readme = "README.md"
 license = "MIT"
@@ -28,4 +28,4 @@ Issues = "https://github.com/shunkroy/ultimate-harness/issues"
 harness = "harness2.cli:main"
 
 [tool.setuptools]
-packages = ["harness2", "harness2.adapters", "harness2.kernel", "harness2.context"]
+packages = ["harness2", "harness2.adapters", "harness2.kernel", "harness2.context", "harness2.skills"]

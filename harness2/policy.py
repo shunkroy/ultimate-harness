@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 from typing import Dict, Optional
 
@@ -37,23 +36,18 @@ def guarded_roots() -> tuple[str, ...]:
 
 
 def expert_for_task(task: str) -> tuple[str, Optional[str], str]:
-    """Invoke the Genius classifier in-process, always dry-run/non-mutating."""
-    path = os.environ.get(
-        "HARNESS_ROUTER",
-        os.path.join(os.path.expanduser("~"), ".config", "opencode", "skills", "genius-core", "genius_router.py"),
+    """Return neutral configured defaults; external routers are not trusted code.
+
+    The former compatibility path imported ``HARNESS_ROUTER`` Python directly
+    into the control process. v3 fails closed instead. A future router must use
+    a bounded, credential-free typed worker protocol.
+    """
+    del task
+    return (
+        os.environ.get("HARNESS_DEFAULT_AGENT") or None,
+        os.environ.get("HARNESS_DEFAULT_MODEL") or None,
+        "trusted deterministic routing; no external router executed",
     )
-    try:
-        spec = importlib.util.spec_from_file_location("harness2_genius_router", path)
-        if spec is None or spec.loader is None:
-            raise ImportError(path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        decision = module.AutoSwitcher().route(task, dry_run=True)
-        return decision.recommended_agent, decision.recommended_model, decision.reasoning
-    except Exception as exc:
-        return os.environ.get("HARNESS_DEFAULT_AGENT") or None, os.environ.get("HARNESS_DEFAULT_MODEL") or None, f"expert classifier unavailable: {exc}"
-
-
 class PolicyRouter:
     def __init__(self, statuses: Dict[str, EngineStatus]):
         self.statuses = statuses
@@ -72,9 +66,6 @@ class PolicyRouter:
 
         explicit = request.engine != "auto"
         text = request.prompt.lower()
-        agent, routed_model, expert_reason = expert_for_task(request.prompt)
-        model = request.model or routed_model
-
         if request.sensitive:
             if not self._usable("local") or not self.statuses["local"].healthy:
                 raise PolicyRefusal("sensitive tasks require an enabled, healthy loopback local engine")
@@ -87,6 +78,9 @@ class PolicyRouter:
                 "opencode", "harness-sandbox", request.model,
                 "untrusted policy: plugins off, read-only sandbox agent", (), "untrusted",
             )
+
+        agent, routed_model, expert_reason = expert_for_task(request.prompt)
+        model = request.model or routed_model
 
         if explicit:
             if request.engine not in self.statuses:

@@ -87,7 +87,7 @@ PY
         mkdir -p "$VENV/bin"
         cat >"$VENV/bin/harness" <<EOF
 #!/bin/sh
-PYTHONPATH='$VENV/site-packages' exec python3 -m harness2.cli "\$@"
+PYTHONSAFEPATH=1 PYTHONPATH='$VENV/site-packages' exec python3 -P -m harness2.cli "\$@"
 EOF
         chmod 0755 "$VENV/bin/harness"
     fi
@@ -100,7 +100,7 @@ else
     mkdir -p "$VENV/bin"
     cat >"$VENV/bin/harness" <<EOF
 #!/bin/sh
-PYTHONPATH='$VENV/site-packages' exec python3 -m harness2.cli "\$@"
+PYTHONSAFEPATH=1 PYTHONPATH='$VENV/site-packages' exec python3 -P -m harness2.cli "\$@"
 EOF
     chmod 0755 "$VENV/bin/harness"
 fi

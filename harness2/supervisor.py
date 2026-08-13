@@ -38,7 +38,10 @@ no filesystem mutations outside the caller-supplied run dir.
 from __future__ import annotations
 
 import errno
-import fcntl
+try:  # Native Windows has no fcntl; mkdir locks remain available.
+    import fcntl
+except ImportError:  # pragma: no cover - exercised by Windows CI
+    fcntl = None  # type: ignore[assignment]
 import os
 import shutil
 import signal
@@ -437,6 +440,8 @@ class FlockLock:
         self._fd: Optional[int] = None
 
     def acquire(self) -> "FlockLock":
+        if fcntl is None:
+            raise OSError(errno.ENOSYS, "flock is unavailable on this platform")
         if self._fd is not None:
             return self  # re-entrant: already held
         directory = os.path.dirname(self.path) or "."
@@ -473,7 +478,8 @@ class FlockLock:
             return
         fd, self._fd = self._fd, None
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
 
@@ -606,6 +612,10 @@ def acquire_start_lock(run_dir: str, name: str = DEFAULT_LOCK_NAME,
     """
     run_dir = ensure_run_dir(run_dir)
     path = os.path.join(run_dir, name)
+    if fcntl is None and method in {"auto", "mkdir"}:
+        return MkdirLock(path, timeout=timeout, stale_after=stale_after).acquire()
+    if fcntl is None:
+        raise OSError(errno.ENOSYS, "flock is unavailable on this platform")
     kind = _lock_kind(path)
     if kind == "mkdir":
         return MkdirLock(path, timeout=timeout, stale_after=stale_after).acquire()

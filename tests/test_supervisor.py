@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 HARNESS_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if HARNESS_ROOT not in sys.path:
@@ -399,6 +400,15 @@ class SupervisorTestCase(unittest.TestCase):
             self.assertTrue(auto_lock.is_held())
         finally:
             auto_lock.release()
+
+    def test_auto_lock_uses_mkdir_when_fcntl_is_unavailable(self) -> None:
+        rd = self.run_dir()
+        with mock.patch.object(sup, "fcntl", None):
+            lock = sup.acquire_start_lock(rd, name="portable.lock", method="auto", timeout=1.0)
+            try:
+                self.assertIsInstance(lock, sup.MkdirLock)
+            finally:
+                lock.release()
 
     def test_lock_methods_adapt_to_existing_lock(self) -> None:
         # A flock lock creates a lock FILE; a mkdir-preferring acquirer on the

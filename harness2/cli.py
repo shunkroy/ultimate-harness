@@ -32,6 +32,9 @@ from .context import ContextCompiler, ContextPackage, ContextRuntime
 from .context.jobs import ContextJobManager
 from .discovery import discover
 from .kernel.catalog import build_catalog
+from .bootstrap import bootstrap
+from .kernel.contracts import ExecutionRequest
+from .kernel.tasks import TaskState
 
 
 ZEN_MODELS = (
@@ -55,16 +58,13 @@ def nonnegative_int(value: str) -> int:
 
 
 def runtime():
-    config = HarnessConfig()
-    config.ensure()
-    store = Store(config.database_path)
-    engines = build_registry(config, store)
-    return config, store, engines, Orchestrator(engines, store)
+    app = bootstrap()
+    return app.config, app.store, app.engines, app.orchestrator
 
 
 def jobs_runtime():
-    config, store, engines, orchestrator = runtime()
-    return config, store, engines, orchestrator, JobManager(config, store, orchestrator)
+    app = bootstrap()
+    return app.config, app.store, app.engines, app.orchestrator, app.jobs()
 
 
 def emit(value, as_json: bool = False) -> None:
@@ -77,14 +77,31 @@ def emit(value, as_json: bool = False) -> None:
 
 
 def cmd_status(args) -> int:
-    config, store, engines, _ = runtime()
+    app = bootstrap()
+    config, store, engines = app.config, app.store, app.engines
     statuses = {name: status.as_dict() if hasattr(status, "as_dict") else asdict(status) for name, status in ((n, e.status()) for n, e in engines.items())}
+    task_counts = {state.value: 0 for state in TaskState}
+    with store.connect() as con:
+        for row in con.execute("SELECT state,COUNT(*) AS count FROM kernel_tasks GROUP BY state"):
+            task_counts[str(row["state"])] = int(row["count"])
+        event_count = int(con.execute("SELECT COUNT(*) FROM kernel_events").fetchone()[0])
     if args.json:
-        emit({"version": __version__, "always_active": active_status(config), "engines": statuses}, True)
+        emit({
+            "version": __version__, "kernel": {"state": "healthy", "schema_version": store.schema_version()},
+            "always_active": active_status(config), "tasks": task_counts,
+            "events": {"persisted": event_count}, "engines": statuses,
+        }, True)
         return 0
     print(f"Harness v{__version__}")
+    print(f"KERNEL healthy schema={store.schema_version()}")
     active = active_status(config)
     print(f"ALWAYS_ACTIVE desired={active['desired_always_active']} observed={active['observed_state']}")
+    print(
+        "TASKS created={created} ready={ready} running={running} waiting={waiting} failed={failed}".format(
+            **task_counts
+        )
+    )
+    print(f"EVENTS persisted={event_count}")
     print("ENGINE     ENABLED  HEALTHY  STATUS       DETAIL")
     for name, item in statuses.items():
         print(f"{name:<10} {str(item['enabled']):<8} {str(item['healthy']):<8} {str(item['status'].value if hasattr(item['status'], 'value') else item['status']):<12} {item['detail']}")
@@ -171,11 +188,103 @@ def request_from_args(args) -> RunRequest:
     )
 
 
+def cmd_task(args) -> int:
+    app = bootstrap()
+    if args.action == "list":
+        state = TaskState(args.state) if args.state else None
+        values = [task.as_dict() for task in app.tasks.list(state=state, limit=args.limit)]
+        emit({"tasks": values, "count": len(values)}, args.json)
+        return 0
+    if args.action == "submit":
+        task_id = args.id or __import__("uuid").uuid4().hex
+        request = ExecutionRequest(
+            task_id=task_id,
+            objective=args.objective,
+            required_capabilities=tuple(args.capability),
+            preferred_runtime=args.runtime,
+            constraints={},
+            budget={"max_attempts": args.max_attempts},
+        )
+        task = app.tasks.submit(
+            request, task_type=args.type, source="cli.user", reason=args.reason,
+            authority="authenticated_user", priority=args.priority,
+            idempotency_key=args.idempotency_key, max_attempts=args.max_attempts,
+        )
+        emit(task.as_dict(), args.json)
+        return 0
+    task = app.tasks.get(args.id)
+    if not task:
+        print(f"task not found: {args.id}", file=sys.stderr)
+        return 1
+    if args.action == "inspect":
+        payload = task.as_dict()
+        payload["events"] = [event.as_dict() for event in app.events.replay(task_id=args.id, limit=args.limit)]
+        emit(payload, args.json)
+        return 0
+    if args.action == "cancel":
+        emit(app.tasks.cancel(args.id).as_dict(), args.json)
+        return 0
+    if args.action == "retry":
+        emit(app.tasks.retry(args.id).as_dict(), args.json)
+        return 0
+    return 2
+
+
+def cmd_events(args) -> int:
+    app = bootstrap()
+    if args.action == "replay":
+        values = [event.as_dict() for event in app.events.replay(
+            after_seq=args.after, limit=args.limit,
+            event_type=args.type, task_id=args.task,
+        )]
+        emit({"events": values, "count": len(values)}, args.json)
+        return 0
+    if args.action == "cursor":
+        emit({"consumer_id": args.consumer, "last_seq": app.events.cursor(args.consumer)}, args.json)
+        return 0
+    if args.action == "ack":
+        value = app.events.ack(args.consumer, args.through)
+        emit({"consumer_id": args.consumer, "last_seq": value}, args.json)
+        return 0
+    return 2
+
+
+def cmd_provider(args) -> int:
+    app = bootstrap()
+    scores = [value.__dict__ for value in app.provider_intelligence.scores(
+        capability_id=args.capability,
+    )]
+    emit({"scores": scores, "count": len(scores), "basis": "local_observations_only"}, args.json)
+    return 0
+
+
+def cmd_resources(args) -> int:
+    app = bootstrap()
+    if args.action == "status":
+        with app.store.connect() as con:
+            queue_length = int(con.execute(
+                "SELECT COUNT(*) FROM kernel_tasks WHERE state NOT IN ('completed','failed','cancelled')"
+            ).fetchone()[0])
+        observation = app.resources.observe("local", app.config.state_root, queue_length=queue_length)
+        app.resources.record(observation)
+        decision = app.resources.evaluate(observation)
+        emit({
+            "observation": observation.__dict__,
+            "decision": {
+                "action": decision.action.value,
+                "reasons": list(decision.reasons),
+                "checkpoint_required": decision.checkpoint_required,
+            },
+        }, args.json)
+        return 0
+    return 2
+
+
 def cmd_run(args) -> int:
-    _, _, _, orchestrator = runtime()
+    app = bootstrap()
     request = request_from_args(args)
     try:
-        decision, result, run_id = orchestrator.run(request)
+        decision, result, run_id = app.foreground().run(request)
     except PolicyRefusal as exc:
         if args.json:
             emit({"success": False, "error": str(exc), "error_code": "policy_refusal"}, True)
@@ -646,7 +755,8 @@ def cmd_svc(args) -> int:
 
 
 def cmd_supervise(args) -> int:
-    config, store, engines, orchestrator, manager = jobs_runtime()
+    app = bootstrap()
+    config, store, engines, manager = app.config, app.store, app.engines, app.jobs()
     prime: PrimeAdapter = engines["prime"]  # type: ignore[assignment]
     pidfile = os.path.join(config.state_root, "run", "service.pid")
     existing = supervisor.read_pidfile(pidfile)
@@ -655,7 +765,8 @@ def cmd_supervise(args) -> int:
     supervisor.write_pidfile(pidfile, os.getpid())
     try:
         ServiceLoop.bootstrap(
-            config, store, prime, manager, ContextJobManager(config, store), interval=args.interval,
+            config, store, prime, manager, ContextJobManager(config, store),
+            interval=args.interval,
         ).run()
     finally:
         try:
@@ -705,6 +816,46 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-fallback", action="store_true")
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--retries", type=nonnegative_int, default=1)
+
+    task = sub.add_parser("task")
+    task_sub = task.add_subparsers(dest="action", required=True)
+    task_list = task_sub.add_parser("list")
+    task_list.add_argument("--state", choices=tuple(state.value for state in TaskState))
+    task_list.add_argument("--limit", type=positive_int, default=100)
+    task_submit = task_sub.add_parser("submit")
+    task_submit.add_argument("objective")
+    task_submit.add_argument("--id")
+    task_submit.add_argument("--idempotency-key")
+    task_submit.add_argument("--type", default="execution")
+    task_submit.add_argument("--reason", default="explicit request")
+    task_submit.add_argument("--priority", type=int, default=0)
+    task_submit.add_argument("--capability", action="append", default=[])
+    task_submit.add_argument("--runtime")
+    task_submit.add_argument("--max-attempts", type=positive_int, default=1)
+    for action in ("inspect", "cancel", "retry"):
+        child = task_sub.add_parser(action)
+        child.add_argument("id")
+        child.add_argument("--limit", type=positive_int, default=100)
+
+    events = sub.add_parser("events")
+    events_sub = events.add_subparsers(dest="action", required=True)
+    replay = events_sub.add_parser("replay")
+    replay.add_argument("--after", type=nonnegative_int, default=0)
+    replay.add_argument("--limit", type=positive_int, default=100)
+    replay.add_argument("--type")
+    replay.add_argument("--task")
+    cursor = events_sub.add_parser("cursor")
+    cursor.add_argument("consumer")
+    ack = events_sub.add_parser("ack")
+    ack.add_argument("consumer")
+    ack.add_argument("through", type=nonnegative_int)
+
+    provider_scores = sub.add_parser("provider")
+    provider_scores.add_argument("action", choices=("scores",))
+    provider_scores.add_argument("--capability")
+
+    resources = sub.add_parser("resources")
+    resources.add_argument("action", choices=("status",))
 
     engines = sub.add_parser("engines")
     engines.add_argument("action", choices=("list", "probe"), default="list", nargs="?")

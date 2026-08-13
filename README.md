@@ -1,5 +1,8 @@
 # Harness v2 — portable unified agent harness
 
+> Development branch: `3.0.0.dev1`. The latest stable public installer remains
+> v2.1.1 while the v3 task/event/skill foundations accumulate CI evidence.
+
 Harness Core is the provider-independent control plane. OpenCode, Prime Agent,
 OpenCode Zen, Hermes, and local runtimes are replaceable capability providers.
 The local llama.cpp adapter is installed but disabled by default.

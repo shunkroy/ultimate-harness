@@ -91,7 +91,9 @@ class AlwaysActiveTests(unittest.TestCase):
         jobs.work_once.return_value = {"id": "run1", "status": "succeeded"}
         context_jobs = Mock()
         context_jobs.work_once.return_value = {"id": "ctx1", "status": "succeeded"}
-        loop = ServiceLoop(self.config, self.store, prime, jobs, context_jobs, interval=1)
+        tasks = Mock()
+        tasks.recover_expired.return_value = 0
+        loop = ServiceLoop(self.config, self.store, prime, jobs, context_jobs, tasks=tasks, interval=1)
         sleeps = 0
 
         def stop_after_one(_):
@@ -105,6 +107,7 @@ class AlwaysActiveTests(unittest.TestCase):
             loop.run()
         jobs.work_once.assert_called_once()
         context_jobs.work_once.assert_called_once()
+        tasks.recover_expired.assert_called_once()
         self.assertEqual(loop.cycles, 1)
 
     def test_bootstrap_publishes_starting_heartbeat_before_loop(self):

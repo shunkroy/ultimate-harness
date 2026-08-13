@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        run: python -m pip install --disable-pip-version-check .
+      - name: Compile imports
+        run: python -m compileall -q harness2 tests
+      - name: Run test suite
+        run: python -m unittest discover -s tests
+      - name: Smoke import and CLI
+        run: python -c "import harness2; from harness2.kernel import ApplicationKernel; print(harness2.__version__)"
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build wheel
+        run: python -m pip wheel . --no-deps --wheel-dir dist
+      - name: Install wheel in clean venv
+        run: |
+          python -m venv smoke
+          smoke/bin/python -m pip install --no-deps dist/*.whl
+          smoke/bin/harness version
+      - name: Verify fallback installer contract tests
+        run: python -m unittest tests.test_installer -v
+
+  portability-import:
+    name: Import smoke / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --disable-pip-version-check .
+      - run: python -c "import harness2, harness2.cli, harness2.supervisor; print(harness2.__version__)"
+      - run: harness version

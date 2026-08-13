@@ -190,6 +190,21 @@ class PolicyTests(unittest.TestCase):
             decision = PolicyRouter(statuses()).decide(RunRequest("work", cwd="/root/example"))
         self.assertEqual(decision.engine, "opencode")
 
+    def test_sensitive_routing_never_invokes_external_classifier(self):
+        with patch("harness2.policy.expert_for_task") as classifier:
+            with self.assertRaises(PolicyRefusal):
+                PolicyRouter(statuses(local=False)).decide(RunRequest("secret", sensitive=True))
+        classifier.assert_not_called()
+
+    def test_external_python_router_is_not_loaded(self):
+        with patch.dict(os.environ, {"HARNESS_ROUTER": "/tmp/untrusted-router.py"}), patch(
+            "builtins.__import__", wraps=__import__,
+        ) as importer:
+            decision = PolicyRouter(statuses()).decide(RunRequest("ordinary task"))
+        self.assertEqual(decision.engine, "opencode")
+        imported = [str(call.args[0]) for call in importer.call_args_list if call.args]
+        self.assertNotIn("harness2_genius_router", imported)
+
 
 class CliTests(unittest.TestCase):
     def test_timeout_validation(self):
@@ -206,6 +221,14 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.action, "agents")
         args = parser.parse_args(["integrity", "verify"])
         self.assertEqual(args.action, "verify")
+        args = parser.parse_args(["task", "list", "--state", "ready"])
+        self.assertEqual((args.command, args.action, args.state), ("task", "list", "ready"))
+        args = parser.parse_args(["events", "replay", "--after", "4"])
+        self.assertEqual((args.command, args.action, args.after), ("events", "replay", 4))
+        args = parser.parse_args(["provider", "scores", "--capability", "code.execute"])
+        self.assertEqual((args.command, args.action), ("provider", "scores"))
+        args = parser.parse_args(["resources", "status"])
+        self.assertEqual((args.command, args.action), ("resources", "status"))
 
     def test_context_submit_cli_uses_runtime_factory(self):
         from harness2.cli import main

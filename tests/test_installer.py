@@ -67,6 +67,7 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('$HOME/.local/share/harness2', text)
         self.assertIn('--target "$VENV/site-packages"', text)
         self.assertIn("PYTHONPATH='$VENV/site-packages'", text)
+        self.assertIn("PYTHONSAFEPATH=1", text)
         self.assertIn('svc restart --interval', text)
         self.assertIn('HARNESS_START_SERVICE', text)
 

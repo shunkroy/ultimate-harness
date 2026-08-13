@@ -138,6 +138,10 @@ class ExecutionRequest:
     constraints: Mapping[str, Any] = field(default_factory=dict)
     budget: Mapping[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        _nonempty(self.task_id, "task_id")
+        _nonempty(self.objective, "objective")
+
 
 @dataclass(frozen=True)
 class ExecutionPlan:
@@ -148,6 +152,12 @@ class ExecutionPlan:
     steps: Tuple[str, ...]
     verification: Tuple[str, ...]
     reason: str
+
+    def __post_init__(self) -> None:
+        _nonempty(self.plan_id, "plan_id")
+        _nonempty(self.task_id, "task_id")
+        _nonempty(self.runtime_id, "runtime_id")
+        _nonempty(self.reason, "reason")
 
 
 @dataclass(frozen=True)
@@ -168,3 +178,7 @@ class ExecutionOutcome:
     error_code: Optional[str] = None
     evidence: Tuple[Mapping[str, Any], ...] = ()
     events: Tuple[ExecutionEvent, ...] = ()
+
+    def __post_init__(self) -> None:
+        _nonempty(self.task_id, "task_id")
+        _nonempty(self.plan_id, "plan_id")
