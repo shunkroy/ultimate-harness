@@ -74,10 +74,11 @@ Android Termux (native, uid u0_a556)
 
 ```sh
 # tests (repo root)
-cd /opt/harness2 && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests   # 306 OK
+cd /opt/harness2 && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -t .   # 308 OK (use -t .; tests/ is a package)
+# older form without -t . breaks on relative imports in test_direct.py — fixed by tests/__init__.py
 
 # integrity
-harness integrity verify          # expect ok=True, pins=66 on the phone
+harness integrity verify          # expect ok=True, pins=67 on the phone
 harness integrity pin             # ONLY after adding/removing source files; re-verify after
 
 # health
@@ -86,6 +87,11 @@ harness doctor
 
 # service
 harness svc status | svc up | svc down
+
+# QA (use the direct engine — sub-second, beats opencode-engine latency)
+harness run --engine direct "question"                             # auto model (HARNESS_DEFAULT_MODEL)
+HARNESS_DEFAULT_MODEL=groq/llama-3.3-70b-versatile harness run --engine direct "question"
+HARNESS_DEFAULT_MODEL=google/gemini-3.5-flash-lite harness run --engine direct "question"
 ```
 
 ## 6. Provider-routing state (sealed in 5a299b5)
@@ -97,19 +103,36 @@ harness svc status | svc up | svc down
 - Failure taxonomy (14 codes) + `normalize_failure()`; circuits keyed
   `engine:provider:model`; audit events `route.selected/failed/skipped/completed`.
 - **Verified working routes (live, 2026-08-14):**
+  - **direct engine — NEW, sub-second (latency fixed):** native REST calls
+    bypass the opencode agent overhead entirely. Measured on this phone:
+    - Groq `direct + groq/llama-3.3-70b-versatile`: **0.4 s** engine time
+      (was 30–75 s via opencode agent; Cloudflare 1010 fixed by sending an
+      explicit `User-Agent` header; endpoint is the full
+      `https://api.groq.com/openai/v1/chat/completions`).
+    - Google `direct + google/gemini-3.5-flash-lite`: **1.4 s** engine time.
+    - Durations are now propagated into engine results (`[Xs run=…]` banner
+      also prints on failures); circuit keys `direct:provider:model` protect
+      every direct route (cooldown grows on repeated failures).
   - zen free via opencode engine: `opencode/deepseek-v4-flash-free` — works,
     but latency is unstable tonight (intermittent timeouts → fallback fires;
-    observed 4 ok / 3 timeout).
+    observed 4 ok / 3 timeout). Use `--engine direct` for interactive QA.
   - direct Google API: `google/gemini-3.5-flash-lite` (env `GEMINI_API_KEY`) —
     reliable; delivered full capabilities answer.
 - **Provider-limited (recorded, not harness faults):** OpenAI `gpt-5.6-sol`
   (quota — both OAuth and direct key), DeepSeek `deepseek-chat` (insufficient
-  balance), Groq `llama-3.3-70b` (12k TPM → `model_unavailable`).
+  balance), Groq `llama-3.3-70b` (12k TPM → `model_unavailable`; small QA
+  prompts e.g. ≤1k tokens fit fine — verified above).
 - To enable the `zen` engine: set `OPENCODE_API_KEY` (user authorization) —
   free zen models already work through the opencode engine without it.
 
 ## 7. Known non-blocking issues (re-evaluated 2026-08-14)
 
+0. **Latency “lightyear” — RESOLVED (this commit):** opencode-agent path
+   (zen free) can still take 30–75 s+ intermittently (queue + agent boot +
+   timeouts). The new **direct engine** (`harness run --engine direct`) does
+   plain HTTPS provider calls → Groq 0.4 s / Google 1.4 s. If a prompt ever
+   shows `[Xs run=…]` with X ≫ 10 on a direct route, check circuits +
+   `/root/.harness2/harness.db` `runs` table (duration recorded).
 1. `prime.source` dirty files=1 (`packages/ai/src/models.generated.ts`) —
    pre-existing, separate task; do not touch.
 2. `zen` engine unconfigured (needs `OPENCODE_API_KEY`); free zen models

@@ -19,7 +19,9 @@ from .models import EngineStatus
 
 #: Default engine preference (execution runtimes, not vendors). Free healthy
 #: routes win at scoring time via cost_class; capability fit adjusts score.
-DEFAULT_ENGINE_PREFERENCE: Tuple[str, ...] = ("opencode", "prime", "zen", "hermes", "local")
+#: ``direct`` is the raw REST single-shot route: no agent boot, sub-second
+#: Q&A; it rescues AUTO when an agent engine fails (measured rescue path).
+DEFAULT_ENGINE_PREFERENCE: Tuple[str, ...] = ("opencode", "prime", "zen", "direct", "hermes", "local")
 
 
 def fallback_order() -> Tuple[str, ...]:

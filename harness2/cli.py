@@ -807,7 +807,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run")
     run.add_argument("prompt")
-    run.add_argument("--engine", choices=("auto", "opencode", "zen", "prime", "hermes", "local"), default="auto")
+    run.add_argument("--engine", choices=("auto", "opencode", "zen", "prime", "hermes", "local", "direct"), default="auto")
     run.add_argument("--agent")
     run.add_argument("--model")
     run.add_argument("--provider")

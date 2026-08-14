@@ -81,7 +81,8 @@ class LegacyRuntimeDriver:
     def execute(self, request: ExecutionRequest, plan: ExecutionPlan) -> ExecutionOutcome:
         routed = replace(
             self.request, engine=plan.runtime_id,
-            agent=request.constraints.get("agent"), model=request.constraints.get("model"),
+            agent=request.constraints.get("agent") or self.request.agent,
+            model=request.constraints.get("model") or self.request.model,
         )
         self.last_result = self.adapter.run(routed)
         return ExecutionOutcome(
@@ -116,7 +117,8 @@ class GovernedLegacyRuntimeDriver(LegacyRuntimeDriver):
         else:
             routed = replace(
                 self.request, engine=plan.runtime_id,
-                agent=request.constraints.get("agent"), model=request.constraints.get("model"),
+                agent=request.constraints.get("agent") or self.request.agent,
+                model=request.constraints.get("model") or self.request.model,
             )
             self.last_result = self.adapter.run(routed)
             retries = 0
