@@ -32,8 +32,25 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(p.kind, PlatformKind.TERMUX)
 
     def test_proot_precedes_termux(self):
-        p = detect_platform(sys_platform="linux", os_name="posix", env={"HOME": "/root", "PREFIX": "/data/data/com.termux/files/usr", "PROOT_L2S_DIR": "/tmp/x"}, home="/root", release="6-PRoot-Distro")
-        self.assertEqual(p.kind, PlatformKind.PROOT)
+        with tempfile.TemporaryDirectory() as home:
+            p = detect_platform(
+                sys_platform="linux", os_name="posix",
+                env={"HOME": home, "PREFIX": "/data/data/com.termux/files/usr", "PROOT_L2S_DIR": os.path.join(home, "proot")},
+                home=home, release="6-PRoot-Distro",
+            )
+            self.assertEqual(p.kind, PlatformKind.PROOT)
+
+    def test_inaccessible_legacy_path_does_not_abort_detection(self):
+        with tempfile.TemporaryDirectory() as home:
+            state_root = os.path.join(home, "state")
+            with patch("harness2.platforms.Path.exists", side_effect=PermissionError("denied")):
+                p = detect_platform(
+                    sys_platform="linux", os_name="posix",
+                    env={"HOME": home, "XDG_STATE_HOME": state_root},
+                    home=home, release="6.8",
+                )
+            self.assertEqual(p.kind, PlatformKind.LINUX)
+            self.assertEqual(str(p.state_dir), os.path.join(state_root, "harness2"))
 
     def test_override(self):
         p = detect_platform(sys_platform="linux", os_name="posix", env={"HOME": "/h", "HARNESS2_HOME": "/custom"}, home="/h", release="6")

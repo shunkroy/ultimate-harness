@@ -157,6 +157,14 @@ def _usable_executable(path: str, info: PlatformInfo) -> bool:
     return os.access(path, os.X_OK)
 
 
+def _safe_exists(path: Path) -> bool:
+    """Treat an inaccessible optional legacy path as absent, not fatal."""
+    try:
+        return path.exists()
+    except (FileNotFoundError, NotADirectoryError, PermissionError):
+        return False
+
+
 def detect_platform(
     *,
     sys_platform: Optional[str] = None,
@@ -195,7 +203,7 @@ def detect_platform(
     state_override = raw_values.get("HARNESS2_HOME")
     if state_override:
         state = Path(state_override).expanduser()
-    elif legacy.exists():
+    elif _safe_exists(legacy):
         state = legacy
     elif kind == PlatformKind.WINDOWS:
         state = Path(raw_values.get("LOCALAPPDATA", str(home_path / "AppData" / "Local"))) / "Harness2"

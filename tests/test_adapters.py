@@ -22,12 +22,49 @@ def proc(stdout="", stderr="", code=0):
     return subprocess.CompletedProcess(["x"], code, stdout, stderr)
 
 
+def fake_executable(directory: str, name: str) -> str:
+    """Create a provider command fixture without requiring a real CLI install."""
+    suffix = ".cmd" if os.name == "nt" else ""
+    path = os.path.join(directory, name + suffix)
+    content = "@exit /b 0\r\n" if os.name == "nt" else "#!/bin/sh\nexit 0\n"
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(content)
+    if os.name != "nt":
+        os.chmod(path, 0o700)
+    return path
+
+
 class AdapterTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
-        self.config = HarnessConfig(state_root=os.path.join(self.tmp.name, "state"))
+        fixture_bin = os.path.join(self.tmp.name, "bin")
+        prime_repo = os.path.join(self.tmp.name, "prime-repo")
+        os.makedirs(fixture_bin)
+        os.makedirs(prime_repo)
+        self.config = HarnessConfig(
+            state_root=os.path.join(self.tmp.name, "state"),
+            opencode_bin=fake_executable(fixture_bin, "opencode"),
+            prime_bin=fake_executable(fixture_bin, "prime-agent"),
+            hermes_bin=fake_executable(fixture_bin, "hermes"),
+            prime_repo=prime_repo,
+        )
         self.config.ensure()
+
+    def test_missing_provider_binaries_report_unavailable(self):
+        missing = os.path.join(self.tmp.name, "missing")
+        config = HarnessConfig(
+            state_root=os.path.join(self.tmp.name, "missing-state"),
+            opencode_bin=os.path.join(missing, "opencode"),
+            prime_bin=os.path.join(missing, "prime-agent"),
+            hermes_bin=os.path.join(missing, "hermes"),
+            prime_repo=os.path.join(self.tmp.name, "missing-prime-repo"),
+        )
+        for adapter in (OpenCodeAdapter(config), PrimeAdapter(config), HermesAdapter(config)):
+            with self.subTest(provider=adapter.name):
+                status = adapter.status()
+                self.assertFalse(status.available)
+                self.assertFalse(status.healthy)
 
     def test_opencode_success_real_schema(self):
         stream = "\n".join((

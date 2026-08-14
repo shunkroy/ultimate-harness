@@ -68,7 +68,15 @@ class IntegrityTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
-        self.config = HarnessConfig(state_root=os.path.join(self.tmp.name, "state"))
+        prime_repo = os.path.join(self.tmp.name, "prime-repo")
+        prime_bundle = os.path.join(prime_repo, "packages", "coding-agent", "dist", "bundle", "cli.js")
+        os.makedirs(os.path.dirname(prime_bundle))
+        with open(prime_bundle, "wb") as fh:
+            fh.write(b"// deterministic Prime bundle fixture\n")
+        self.config = HarnessConfig(
+            state_root=os.path.join(self.tmp.name, "state"),
+            prime_repo=prime_repo,
+        )
         self.config.ensure()
 
     def test_missing_integrity_manifest_fails_closed(self):
@@ -79,10 +87,11 @@ class IntegrityTests(unittest.TestCase):
 
     def test_integrity_manifest_detects_mismatch(self):
         artifacts = {**core_integrity_artifacts(self.config), **integrity_artifacts(self.config)}
+        self.assertEqual(artifacts["harness.prime_wrapper"], self.config.prime_wrapper)
+        self.assertEqual(artifacts["prime.bundle"], self.config.prime_bundle)
         expected = {}
         for name, path in artifacts.items():
-            if not os.path.isfile(path):
-                self.skipTest(f"artifact unavailable: {name}")
+            self.assertTrue(os.path.isfile(path), f"fixture artifact unavailable: {name}")
             with open(path, "rb") as fh:
                 expected[name] = __import__("hashlib").sha256(fh.read()).hexdigest()
         expected["harness.module"] = "0" * 64
