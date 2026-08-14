@@ -27,7 +27,7 @@ redone; this document records the runtime-readiness stage only.
 | 3. Provider discovery/routing | PASS | `harness providers`: harness kernel + opencode + prime healthy/enabled; zen, hermes, local disabled by config as designed; `validation_errors: []`; no generated catalogs modified (repo clean) |
 | 4. Persistence/restart | PASS | audit chain survived restart (51 entries, verified); encrypted job store intact; `svc down` → `svc up` → new pid 16481 process_verified, heartbeat 3 s, kernel healthy |
 | 5. Termux launcher | PASS | `~/bin/harness-phone` (0700, bash -n clean); standalone run reaches proot-distro login boundary; post-login logic verified (idempotent `svc up`, status healthy) |
-| 6. Fresh-session launch | PASS (simulated) | Clean-env (`env -i`) execution of launcher; physical proot entry requires a real Termux session — one command below |
+| 6. Fresh-session launch | PASS (logic), PENDING (native) | Clean-env execution + argv-exact `bash -c` reproduction of every launcher command; the proot boundary itself cannot be executed from inside PRoot (proot cannot nest) — requires one real Termux session |
 | 7. Readiness sealed | PASS | this document + commit |
 
 ## Known state (non-blocking)
@@ -41,6 +41,30 @@ redone; this document records the runtime-readiness stage only.
 - 2 failed tasks in store = the two provider-quota runs (expected, isolated).
 - `verify-after-clone.sh` venv smoke needs `python3-venv` (absent in PRoot);
   wheel install/import/CLI verified equivalently.
+
+## Launcher fix (2026-08-14, found via real native Termux bash -x trace)
+
+Root cause: the launcher received `CMD=status`, invoked
+`proot-distro login ubuntu -- bash -c '...' _ status`, so inside the PRoot
+script `$0=_`, `$1=status` — but a stray PRoot-side `shift` deleted `status`
+before `exec harness "$@"`, leaving Harness with no command.
+
+Fix (only this): remove the PRoot-side shift. The native-Termux shift after
+`CMD="${1:-shell}"` is correct and kept.
+
+Correct block:
+
+```sh
+if [ "$1" = "shell" ]; then
+    exec bash -l
+fi
+exec harness "$@"
+```
+
+Verified from inside PRoot with the argv-exact reproduction
+(`bash -c '<inner>' _ <args>` — the proot layer passes argv through verbatim):
+`status`, `version`, `doctor` PASS; argument-bearing `platform --json`
+(1 arg) and `audit --tail 2 tail` (3 args) PASS — all arguments survive.
 
 ## From a real Termux session
 
