@@ -1,0 +1,33 @@
+{
+  "schema": "harness2.migration-inventory-policy/v1",
+  "persistent": [
+    "harness.db",
+    "integrity.json",
+    "jobs",
+    "contexts",
+    "context-jobs",
+    "objects"
+  ],
+  "secrets": [
+    "secrets.json",
+    "secrets.dpapi",
+    "job.key",
+    "object-store.key"
+  ],
+  "rebuildable_excluded": [
+    "run",
+    "tmp",
+    "logs",
+    "cache",
+    "caches",
+    "__pycache__",
+    ".pytest_cache",
+    "harness.db-wal",
+    "harness.db-shm",
+    "harness.db-journal"
+  ],
+  "unknown_entry_policy": "refuse",
+  "symlink_policy": "refuse",
+  "database_snapshot": "sqlite-write-reservation-plus-two-matching-online-backups-and-integrity-check",
+  "secret_values_in_manifest": false
+}

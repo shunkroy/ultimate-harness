@@ -43,6 +43,7 @@ Design notes:
 from __future__ import annotations
 
 import json
+import io
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -106,6 +107,8 @@ class ParseResult:
     raw_event_count: int = 0
     saw_terminal: bool = False
     malformed_count: int = 0
+    terminal_count: int = 0
+    trailing_count: int = 0
 
     @property
     def success(self) -> bool:
@@ -207,7 +210,21 @@ def _append_opencode_text(result: ParseResult, event: JsonObject) -> None:
         result.text += text
 
 
-def parse_opencode(lines: Iterable[str]) -> ParseResult:
+def _strict_result(result: ParseResult) -> ParseResult:
+    if result.error:
+        return result
+    if result.malformed_count:
+        result.error = "provider stream contained malformed JSON events"
+        result.error_code = "malformed_stream"
+    elif result.trailing_count:
+        result.error = "provider stream contained records after its terminal event"
+        result.error_code = "trailing_stream"
+    return result
+
+
+def parse_opencode(
+    lines: Iterable[str], *, strict: bool = False, max_events: int = 10_000,
+) -> ParseResult:
     """Parse an OpenCode ``--format json`` JSONL stream.
 
     Args:
@@ -217,19 +234,50 @@ def parse_opencode(lines: Iterable[str]) -> ParseResult:
         A :class:`ParseResult`; never raises on malformed input.
     """
     result = ParseResult(source="opencode")
+    last_terminal: Optional[str] = None
     for raw in lines:
         result.raw_event_count += 1
+        if strict and result.raw_event_count > max_events:
+            result.error = f"provider stream exceeded {max_events} events"
+            result.error_code = "event_limit"
+            return result
+        after_terminal = result.saw_terminal
         line = raw.strip()
         if not line:
             continue
         try:
             event = json.loads(line)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             result.malformed_count += 1
+            if after_terminal:
+                result.trailing_count += 1
             continue
         if not isinstance(event, dict):
+            if strict:
+                result.malformed_count += 1
+            if after_terminal:
+                result.trailing_count += 1
             continue
         etype = event.get("type")
+        if strict:
+            part = event.get("part")
+            invalid = (
+                (etype == OPENCODE_TEXT_EVENT and not (
+                    isinstance(part, dict) and part.get("type") in (None, "text")
+                    and isinstance(part.get("text"), str)
+                ))
+                or (etype == "step_finish" and not (
+                    isinstance(part, dict) and part.get("type") == "step-finish"
+                ))
+                or (etype == OPENCODE_ERROR_EVENT and not isinstance(event.get("error"), (dict, str)))
+            )
+            if invalid:
+                result.malformed_count += 1
+                if after_terminal:
+                    result.trailing_count += 1
+                continue
+        if after_terminal and not (last_terminal == "error" and etype == "error"):
+            result.trailing_count += 1
         if result.session_id is None:
             # Real events carry sessionID at top level; part.sessionID is a
             # tolerated fallback.
@@ -242,11 +290,15 @@ def parse_opencode(lines: Iterable[str]) -> ParseResult:
             _append_opencode_text(result, event)
         elif etype == OPENCODE_ERROR_EVENT:
             result.saw_terminal = True
+            result.terminal_count += 1
+            last_terminal = "error"
             _record_opencode_error(result, event.get("error"))
         elif etype == "step_finish":
             result.saw_terminal = True
+            result.terminal_count += 1
+            last_terminal = "step_finish"
         # step_start / message / session.* / etc. carry no assistant text.
-    return result
+    return _strict_result(result) if strict else result
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +407,9 @@ def _prime_consume_agent_end(
     return last_fingerprint
 
 
-def parse_prime(lines: Iterable[str]) -> ParseResult:
+def parse_prime(
+    lines: Iterable[str], *, strict: bool = False, max_events: int = 10_000,
+) -> ParseResult:
     """Parse a Prime Agent ``--mode json`` JSONL stream.
 
     Args:
@@ -368,22 +422,46 @@ def parse_prime(lines: Iterable[str]) -> ParseResult:
     last_fingerprint: Optional[str] = None
     for raw in lines:
         result.raw_event_count += 1
+        if strict and result.raw_event_count > max_events:
+            result.error = f"provider stream exceeded {max_events} events"
+            result.error_code = "event_limit"
+            return result
+        after_terminal = result.saw_terminal
         line = raw.strip()
         if not line:
             continue
         try:
             event = json.loads(line)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             result.malformed_count += 1
+            if after_terminal:
+                result.trailing_count += 1
             continue
         if not isinstance(event, dict):
+            if strict:
+                result.malformed_count += 1
+            if after_terminal:
+                result.trailing_count += 1
             continue
         etype = event.get("type")
+        if strict:
+            invalid = (
+                (etype == "agent_end" and not isinstance(event.get("messages"), list))
+                or (etype in ("message_end", "turn_end") and not isinstance(event.get("message"), dict))
+            )
+            if invalid:
+                result.malformed_count += 1
+                if after_terminal:
+                    result.trailing_count += 1
+                continue
+        if after_terminal:
+            result.trailing_count += 1
         if result.session_id is None:
             result.session_id = _first_str(event, "sessionId", "session_id", "sessionID")
 
         if etype == "agent_end":
             result.saw_terminal = True
+            result.terminal_count += 1
             last_fingerprint = _prime_consume_agent_end(
                 result, event.get("messages"), last_fingerprint
             )
@@ -402,7 +480,7 @@ def parse_prime(lines: Iterable[str]) -> ParseResult:
                 result.session_id = _first_str(msg, "sessionId", "session_id", "sessionID")
         # Everything else (agent_start, turn_start, message_start,
         # message_update, tool_execution_*) carries deltas or lifecycle info.
-    return result
+    return _strict_result(result) if strict else result
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +488,7 @@ def parse_prime(lines: Iterable[str]) -> ParseResult:
 # ---------------------------------------------------------------------------
 
 
-def parse(format: str, lines: Iterable[str]) -> ParseResult:
+def parse(format: str, lines: Iterable[str], *, strict: bool = False) -> ParseResult:
     """Parse a JSONL event stream for the given ``format``.
 
     Args:
@@ -421,14 +499,14 @@ def parse(format: str, lines: Iterable[str]) -> ParseResult:
         ValueError: for an unknown format name.
     """
     if format == "opencode":
-        return parse_opencode(lines)
+        return parse_opencode(lines, strict=strict)
     if format == "prime":
-        return parse_prime(lines)
+        return parse_prime(lines, strict=strict)
     raise ValueError(f"unknown event format: {format!r} (expected 'opencode' or 'prime')")
 
 
-def parse_text(format: str, text: str) -> ParseResult:
+def parse_text(format: str, text: str, *, strict: bool = False) -> ParseResult:
     """Parse a whole JSONL blob (newline separated) for the given ``format``."""
     if text is None:
         text = ""
-    return parse(format, text.splitlines())
+    return parse(format, io.StringIO(text), strict=strict)

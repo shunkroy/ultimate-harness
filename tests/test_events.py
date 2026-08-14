@@ -87,6 +87,28 @@ class OpenCodeParserTests(unittest.TestCase):
         self.assertEqual(result.malformed_count, 2)
         self.assertTrue(result.success)
 
+    def test_strict_boundary_rejects_malformed_or_trailing_records(self):
+        malformed = parse_text("opencode", lines(
+            "not-json",
+            '{"type":"step_finish","part":{"type":"step-finish"}}',
+        ), strict=True)
+        self.assertFalse(malformed.success)
+        self.assertEqual(malformed.error_code, "malformed_stream")
+
+        trailing = parse_text("opencode", lines(
+            '{"type":"step_finish","part":{"type":"step-finish"}}',
+            '{"type":"text","part":{"type":"text","text":"late"}}',
+        ), strict=True)
+        self.assertFalse(trailing.success)
+        self.assertEqual(trailing.error_code, "trailing_stream")
+
+        invalid_schema = parse_text("opencode", lines(
+            "[]",
+            '{"type":"step_finish"}',
+        ), strict=True)
+        self.assertFalse(invalid_schema.success)
+        self.assertEqual(invalid_schema.error_code, "malformed_stream")
+
     def test_partial_output_followed_by_error(self):
         stream = [
             '{"type":"step_start","sessionID":"ses_x","part":{"type":"step-start"}}',
@@ -296,6 +318,17 @@ class PrimeParserTests(unittest.TestCase):
         # malformed; '[]' is valid JSON but not an object and is tolerated.
         self.assertEqual(result.malformed_count, 2)
         self.assertTrue(result.success)
+
+    def test_strict_boundary_rejects_prime_trailing_records(self):
+        result = parse_text("prime", lines(
+            '{"type":"agent_end","messages":[]}',
+            '{"type":"turn_start"}',
+        ), strict=True)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "trailing_stream")
+        invalid = parse_text("prime", '{"type":"agent_end"}', strict=True)
+        self.assertFalse(invalid.success)
+        self.assertEqual(invalid.error_code, "malformed_stream")
 
     def test_partial_output_followed_by_error(self):
         stream = [

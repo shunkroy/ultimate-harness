@@ -15,9 +15,11 @@ health, circuit breakers and a hash-chained metadata-only audit ledger.
 Termux or Linux:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSLo /tmp/install-harness2.sh \
+installer="$(mktemp "${TMPDIR:-/tmp}/install-harness2.XXXXXX")" && \
+trap 'rm -f "$installer"' EXIT HUP INT TERM && \
+curl --proto '=https' --tlsv1.2 -fsSLo "$installer" \
   https://raw.githubusercontent.com/shunkroy/ultimate-harness/v2.1.1/install.sh && \
-sh /tmp/install-harness2.sh
+sh "$installer"
 ```
 
 The version-pinned installer downloads the GitHub Release wheel and

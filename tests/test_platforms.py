@@ -30,6 +30,8 @@ class DetectionTests(unittest.TestCase):
     def test_termux(self):
         p = detect_platform(sys_platform="linux", os_name="posix", env={"HOME": "/data/home", "PREFIX": "/data/data/com.termux/files/usr"}, home="/data/home", release="6")
         self.assertEqual(p.kind, PlatformKind.TERMUX)
+        self.assertEqual(p.platform_id, "android-termux")
+        self.assertEqual(p.capability_map()["android_bridge"], "not_implemented")
 
     def test_proot_precedes_termux(self):
         with tempfile.TemporaryDirectory() as home:
@@ -71,6 +73,18 @@ class DetectionTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", p.env)
         self.assertNotIn("OTHER_TOKEN", p.env)
         self.assertNotIn("secret", repr(p))
+        self.assertEqual(p.credentials["OPENAI_API_KEY"], "secret")
+
+    def test_credentials_are_captured_from_explicit_platform_environment(self):
+        with tempfile.TemporaryDirectory() as home:
+            p = detect_platform(
+                sys_platform="linux", os_name="posix",
+                env={"HOME": home, "PATH": "", "OPENAI_API_KEY": "captured-value"},
+                home=home, release="6",
+            )
+            config = HarnessConfig(platform=p, state_root=os.path.join(home, "state"))
+            with patch.dict(os.environ, {"OPENAI_API_KEY": "ambient-value"}):
+                self.assertEqual(config.credential("OPENAI_API_KEY"), "captured-value")
 
 
 class LaunchTests(unittest.TestCase):
@@ -79,18 +93,51 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(p.command_prefix("C:/x/tool.cmd")[:5], ["C:/Windows/cmd.exe", "/d", "/s", "/c", "C:/x/tool.cmd"])
         self.assertIn("creationflags", p.background_kwargs())
 
+    def test_windows_powershell_override_is_not_falsely_executable(self):
+        with tempfile.TemporaryDirectory() as home:
+            script = os.path.join(home, "provider.ps1")
+            with open(script, "w", encoding="utf-8") as stream:
+                stream.write("exit 0\n")
+            p = detect_platform(
+                sys_platform="win32", os_name="nt",
+                env={"USERPROFILE": home, "PATH": ""}, home=home, release="10",
+            )
+            self.assertIsNone(p.executable(script))
+
     def test_posix_direct_and_session(self):
         p = detect_platform(sys_platform="linux", os_name="posix", env={"HOME": "/h"}, home="/h", release="6")
         self.assertEqual(p.command_prefix("/bin/x"), ["/bin/x"])
         self.assertEqual(p.background_kwargs(), {"start_new_session": True})
 
     def test_discover_override_and_which(self):
-        p = detect_platform(sys_platform="linux", os_name="posix", env={"HOME": "/h", "HARNESS_NODE_BIN": "/custom/node", "PATH": "/bin"}, home="/h", release="6")
-        with patch("harness2.platforms._usable_executable", return_value=True):
-            self.assertEqual(p.discover("node"), "/custom/node")
-        p2 = detect_platform(sys_platform="linux", os_name="posix", env={"HOME": "/h", "PATH": "/bin"}, home="/h", release="6")
-        with patch("harness2.platforms.shutil.which", return_value="/bin/node"):
-            self.assertEqual(p2.discover("node"), "/bin/node")
+        with tempfile.TemporaryDirectory() as home:
+            executable = os.path.join(home, "node")
+            with open(executable, "w", encoding="utf-8") as stream:
+                stream.write("#!/bin/sh\nexit 0\n")
+            os.chmod(executable, 0o700)
+            p = detect_platform(
+                sys_platform="linux", os_name="posix",
+                env={"HOME": home, "HARNESS_NODE_BIN": executable, "PATH": ""},
+                home=home, release="6",
+            )
+            self.assertEqual(p.discover("node"), os.path.realpath(executable))
+            p2 = detect_platform(
+                sys_platform="linux", os_name="posix",
+                env={"HOME": home, "PATH": home}, home=home, release="6",
+            )
+            with patch("harness2.platforms.shutil.which", return_value=executable):
+                self.assertEqual(p2.discover("node"), os.path.realpath(executable))
+
+    def test_explicit_empty_path_does_not_search_host_environment(self):
+        with tempfile.TemporaryDirectory() as home, patch(
+            "harness2.platforms.shutil.which", return_value=None,
+        ) as which:
+            p = detect_platform(
+                sys_platform="linux", os_name="posix",
+                env={"HOME": home, "PATH": ""}, home=home, release="6",
+            )
+            self.assertIsNone(p.discover("missing-provider"))
+            self.assertEqual(which.call_args.kwargs["path"], "")
 
     def test_config_prefers_running_interpreter_for_portable_install(self):
         p = detect_platform(
@@ -100,6 +147,32 @@ class LaunchTests(unittest.TestCase):
         )
         config = HarnessConfig(platform=p, state_root="/tmp/harness-config-test")
         self.assertEqual(config.python_bin, os.path.abspath(sys.executable))
+
+    def test_clean_environment_preserves_explicit_proot_contract(self):
+        with tempfile.TemporaryDirectory() as home:
+            state = os.path.join(home, "state")
+            p = detect_platform(
+                sys_platform="linux", os_name="posix",
+                env={
+                    "HOME": home,
+                    "PATH": "/usr/bin:/bin",
+                    "PREFIX": "/data/data/com.termux/files/usr",
+                    "PROOT_DISTRO": "ubuntu",
+                    "XDG_CONFIG_HOME": os.path.join(home, "config"),
+                    "SSL_CERT_FILE": os.path.join(home, "ca.pem"),
+                    "UNSAFE_INHERITED": "no",
+                },
+                home=home, release="6-PRoot-Distro",
+            )
+            config = HarnessConfig(platform=p, state_root=state)
+            env = config.clean_env("local")
+            self.assertEqual(env["PREFIX"], "/data/data/com.termux/files/usr")
+            self.assertEqual(env["PROOT_DISTRO"], "ubuntu")
+            self.assertEqual(env["XDG_CONFIG_HOME"], os.path.join(home, "config"))
+            self.assertEqual(env["SSL_CERT_FILE"], os.path.join(home, "ca.pem"))
+            self.assertEqual(env["TMPDIR"], os.path.join(state, "tmp"))
+            self.assertNotIn("UNSAFE_INHERITED", env)
+            self.assertEqual(len(config.execution_profile()["sha256"]), 64)
 
 
 class UrlTests(unittest.TestCase):

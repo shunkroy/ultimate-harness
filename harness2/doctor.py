@@ -17,6 +17,7 @@ from .registry import build_registry
 from .security import private_mode
 from .store import Store
 from .service import active_status
+from .execution import ProcessRequest, ProcessSpawnError, run_process, secret_environment_keys
 
 
 @dataclass(frozen=True)
@@ -32,10 +33,15 @@ class Check:
 
 def _version(name: str, argv: list[str], env: Dict[str, str]) -> Check:
     try:
-        proc = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=20)
+        proc = run_process(ProcessRequest(
+            tuple(argv), env=env, cwd=os.getcwd(), timeout=20,
+            stdout_limit=64 * 1024, stderr_limit=64 * 1024,
+            secret_env_keys=secret_environment_keys(env),
+        ))
         value = (proc.stdout or proc.stderr).strip().splitlines()[0] if (proc.stdout or proc.stderr).strip() else "no output"
-        return Check(name, proc.returncode == 0, value[:200])
-    except Exception as exc:
+        ok = proc.returncode == 0 and not proc.timed_out and not proc.output_limited
+        return Check(name, ok, value[:200])
+    except (OSError, ValueError, ProcessSpawnError) as exc:
         return Check(name, False, str(exc))
 
 

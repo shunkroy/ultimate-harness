@@ -190,14 +190,23 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(decision.engine, "hermes")
 
     def test_guarded_cwd_refused(self):
-        with patch.dict(os.environ, {"HARNESS_GUARDED_ROOTS": "/srv/protected"}):
-            with self.assertRaises(PolicyRefusal):
-                PolicyRouter(statuses()).decide(RunRequest("work", cwd="/srv/protected/project"))
+        with tempfile.TemporaryDirectory() as root:
+            project = os.path.join(root, "project")
+            os.mkdir(project)
+            with patch.dict(os.environ, {"HARNESS_GUARDED_ROOTS": root}):
+                with self.assertRaisesRegex(PolicyRefusal, "guarded root"):
+                    PolicyRouter(statuses()).decide(RunRequest("work", cwd=project))
 
     def test_guarded_roots_are_opt_in(self):
-        with patch.dict(os.environ, {}, clear=True):
-            decision = PolicyRouter(statuses()).decide(RunRequest("work", cwd="/root/example"))
-        self.assertEqual(decision.engine, "opencode")
+        with tempfile.TemporaryDirectory() as cwd, patch.dict(os.environ, {}, clear=True):
+            decision = PolicyRouter(statuses()).decide(RunRequest("work", cwd=cwd))
+            self.assertEqual(decision.engine, "opencode")
+
+    def test_public_request_cannot_inject_prepared_cwd_identity(self):
+        with tempfile.TemporaryDirectory() as root:
+            identity = (os.stat(root).st_dev, os.stat(root).st_ino)
+            with self.assertRaises(TypeError):
+                RunRequest("work", cwd=root, cwd_identity=identity)  # type: ignore[call-arg]
 
     def test_sensitive_routing_never_invokes_external_classifier(self):
         with patch("harness2.policy.expert_for_task") as classifier:

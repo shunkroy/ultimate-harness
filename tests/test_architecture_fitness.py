@@ -40,6 +40,23 @@ class ArchitectureFitnessTests(unittest.TestCase):
                     constructed.append((node.func.id, node.lineno))
         self.assertEqual(constructed, [])
 
+    def test_runtime_driver_protocol_has_one_authoritative_definition(self):
+        definitions = []
+        for path in (ROOT / "kernel").glob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef) and node.name == "RuntimeDriver":
+                    definitions.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(len(definitions), 1)
+        self.assertTrue(definitions[0].startswith("registry.py:"))
+
+    def test_external_cli_adapters_use_the_bounded_execution_boundary(self):
+        for name in ("opencode.py", "prime.py", "hermes.py"):
+            text = (ROOT / "adapters" / name).read_text(encoding="utf-8")
+            with self.subTest(adapter=name):
+                self.assertIn("run_process", text)
+                self.assertNotIn("subprocess.run", text)
+
     def test_maturity_order_does_not_equate_health_or_benchmarking(self):
         self.assertNotEqual(Maturity.TESTED, Maturity.BENCHMARKED)
         self.assertNotEqual(Maturity.IMPLEMENTED, Maturity.STABLE)

@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import os
-import subprocess
 import time
 
 from .base import EngineAdapter
 from ..config import HarnessConfig
 from ..events import parse_text
+from ..execution import (
+    ProcessConfigurationError,
+    ProcessRequest,
+    ProcessSpawnError,
+    prepare_working_directory,
+    run_process,
+    secret_environment_keys,
+)
 from ..models import CapabilityStatus, EngineResult, EngineStatus, RunRequest
 from ..security import PrivateTempFile, ensure_private_dir
 
@@ -20,8 +28,7 @@ class OpenCodeAdapter(EngineAdapter):
         self.config = config
 
     def status(self) -> EngineStatus:
-        executable = self.config.opencode_bin
-        available = bool(executable and os.path.isfile(executable))
+        available = self.config.executable_available("opencode")
         detail = "headless JSON runner ready" if available else f"missing: {self.config.opencode_bin}"
         return EngineStatus(
             self.name, available, available, True,
@@ -34,31 +41,58 @@ class OpenCodeAdapter(EngineAdapter):
         started = time.monotonic()
         model = request.model or self.config.free_model
         agent = request.agent or self.config.default_agent
-        argv = [*self.config.command("opencode"), "run", "--format", "json"]
-        if agent:
-            argv += ["--agent", agent]
-        if model:
-            argv += ["-m", model]
-        if request.untrusted:
-            argv.append("--pure")
-        if request.cwd:
-            argv += ["--dir", request.cwd]
-        temp_dir = ensure_private_dir(os.path.join(str(self.config.state_root), "tmp"))
+        if not self.status().available:
+            return EngineResult(
+                self.name, False, error="OpenCode executable is unavailable",
+                error_code="unavailable", exit_code=1,
+                duration=time.monotonic() - started,
+            )
         try:
+            cwd, cwd_identity = prepare_working_directory(
+                request.cwd, getattr(request, "cwd_identity", None),
+            )
+            argv = [*self.config.command("opencode"), "run", "--format", "json"]
+            if agent:
+                argv += ["--agent", agent]
+            if model:
+                argv += ["-m", model]
+            if request.untrusted:
+                argv.append("--pure")
+            argv += ["--dir", cwd]
+            temp_dir = ensure_private_dir(os.path.join(str(self.config.state_root), "tmp"))
             with PrivateTempFile(temp_dir, request.prompt.encode("utf-8")) as prompt_file:
-                proc = subprocess.run(
-                    [*argv, "Execute the complete user request in the attached private task file.", "--file", prompt_file],
-                    env=self.config.clean_env("opencode", provider=request.provider, model=model),
-                    cwd=request.cwd or os.getcwd(),
-                    capture_output=True,
-                    text=True,
+                command = [
+                    *argv,
+                    "Execute the complete user request in the attached private task file.",
+                    "--file", prompt_file,
+                ]
+                env = self.config.clean_env("opencode", provider=request.provider, model=model)
+                proc = run_process(ProcessRequest(
+                    tuple(command), env=env, cwd=cwd, cwd_identity=cwd_identity,
                     timeout=request.timeout,
-                )
-        except subprocess.TimeoutExpired:
-            return EngineResult(self.name, False, error=f"timed out after {request.timeout}s", error_code="timeout", exit_code=124, duration=time.monotonic() - started)
-        except OSError as exc:
+                    stdout_limit=int(self.config.stdout_limit),
+                    stderr_limit=int(self.config.stderr_limit),
+                    private_argv_indices=(len(command) - 1,),
+                    secret_env_keys=secret_environment_keys(env),
+                ))
+        except ProcessConfigurationError as exc:
+            return EngineResult(self.name, False, error=str(exc), error_code="invalid_execution", exit_code=2, duration=time.monotonic() - started)
+        except (ProcessSpawnError, OSError) as exc:
             return EngineResult(self.name, False, error=str(exc), error_code="spawn_error", exit_code=1, duration=time.monotonic() - started)
-        parsed = parse_text("opencode", proc.stdout or "")
+        if proc.timed_out:
+            return EngineResult(
+                self.name, False, error=f"timed out after {request.timeout}s",
+                error_code="timeout", exit_code=124, duration=proc.duration,
+                metadata={"execution_config_sha256": proc.config_fingerprint},
+            )
+        if proc.output_limited:
+            return EngineResult(
+                self.name, False, text=proc.stdout,
+                error="provider output exceeded the configured byte limit",
+                error_code="output_limit", exit_code=125, duration=proc.duration,
+                metadata={"execution_config_sha256": proc.config_fingerprint},
+            )
+        parsed = parse_text("opencode", proc.stdout or "", strict=True)
         error = parsed.error
         code = parsed.error_code
         if proc.returncode != 0 and not error:
@@ -71,7 +105,11 @@ class OpenCodeAdapter(EngineAdapter):
             self.name, success, parsed.text, error, code,
             0 if success else (proc.returncode or 1), time.monotonic() - started,
             parsed.session_id, parsed.raw_event_count,
-            {"agent": agent, "model": model, "malformed_events": parsed.malformed_count},
+            {
+                "agent": agent, "model": model,
+                "malformed_events": parsed.malformed_count,
+                "execution_config_sha256": proc.config_fingerprint,
+            },
         )
 
 
@@ -97,7 +135,7 @@ class ZenAdapter(OpenCodeAdapter):
         model = request.model or self.DEFAULT_MODEL
         if not model.startswith("opencode/"):
             return EngineResult(self.name, False, error="Zen model must use the opencode/<model> namespace", error_code="invalid_model", exit_code=2)
-        routed = RunRequest(**{**request.__dict__, "model": model, "provider": "opencode"})
+        routed = replace(request, model=model, provider="opencode")
         result = super().run(routed)
         result.engine = self.name
         return result

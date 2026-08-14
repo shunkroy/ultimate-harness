@@ -12,7 +12,6 @@ class RegistryConflict(ValueError):
 
 
 class RuntimeDriver(Protocol):
-    def descriptor(self) -> RuntimeDescriptor: ...
     def execute(self, request: ExecutionRequest, plan: ExecutionPlan) -> ExecutionOutcome: ...
 
 

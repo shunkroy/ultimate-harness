@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, fields
 from typing import Dict, Optional
 
 from .models import EngineStatus, RoutingDecision, RunRequest
+from .execution import ProcessConfigurationError, prepare_working_directory
 
 
 _DURABLE = ("long-running", "long running", "background agent", "persistent", "ipython", "recursive subagent", "schedule", "heartbeat", "detach", "reattach", "rlm")
 _MESSAGING = ("telegram", "discord", "whatsapp", "signal", "send message", "broadcast", "gateway")
 _PARALLEL = ("parallel agents", "fan out", "fan-out", "delegate in parallel", "multiple workers")
+
+
+@dataclass(frozen=True)
+class _PreparedRunRequest(RunRequest):
+    """Internal request carrying filesystem authority established by policy."""
+
+    cwd_identity: tuple[int, int] = (0, 0)
 
 
 class PolicyRefusal(RuntimeError):
@@ -21,7 +30,8 @@ def _inside(path: Optional[str], root: str) -> bool:
     if not path:
         return False
     try:
-        return os.path.commonpath((os.path.realpath(path), os.path.realpath(root))) == os.path.realpath(root)
+        canonical_root = os.path.realpath(root)
+        return os.path.commonpath((path, canonical_root)) == canonical_root
     except ValueError:
         return False
 
@@ -33,6 +43,27 @@ def guarded_roots() -> tuple[str, ...]:
         for path in (configured or "").split(os.pathsep)
         if path
     )
+
+
+def canonicalize_request(request: RunRequest) -> RunRequest:
+    try:
+        if isinstance(request, _PreparedRunRequest):
+            cwd, identity = prepare_working_directory(request.cwd, request.cwd_identity)
+            return request
+        cwd, identity = prepare_working_directory(request.cwd)
+    except ProcessConfigurationError as exc:
+        raise PolicyRefusal(str(exc)) from exc
+    values = {item.name: getattr(request, item.name) for item in fields(RunRequest)}
+    values["cwd"] = cwd
+    return _PreparedRunRequest(**values, cwd_identity=identity)
+
+
+def restore_request_authority(request: RunRequest, identity: tuple[int, int]) -> RunRequest:
+    """Reconstitute only authenticated persisted CWD authority."""
+
+    values = {item.name: getattr(request, item.name) for item in fields(RunRequest)}
+    prepared = _PreparedRunRequest(**values, cwd_identity=identity)
+    return canonicalize_request(prepared)
 
 
 def expert_for_task(task: str) -> tuple[str, Optional[str], str]:
@@ -57,7 +88,8 @@ class PolicyRouter:
         return bool(status and status.available and status.enabled)
 
     def decide(self, request: RunRequest) -> RoutingDecision:
-        cwd = request.cwd or os.getcwd()
+        request = canonicalize_request(request)
+        cwd = request.cwd
         for root in guarded_roots():
             if _inside(cwd, root):
                 raise PolicyRefusal(

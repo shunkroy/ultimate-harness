@@ -10,7 +10,7 @@ from typing import Dict
 from .adapters.base import EngineAdapter
 from .circuit import CircuitBreaker
 from .models import EngineResult, RoutingDecision, RunRequest
-from .policy import PolicyRouter
+from .policy import PolicyRouter, canonicalize_request
 from .store import Store
 
 
@@ -28,11 +28,15 @@ class Orchestrator:
         return ":".join((engine, request.provider or "-", decision.model or "-"))
 
     def decide(self, request: RunRequest) -> RoutingDecision:
-        return PolicyRouter(self.statuses()).decide(request)
+        return self.prepare(request)[1]
+
+    def prepare(self, request: RunRequest) -> tuple[RunRequest, RoutingDecision]:
+        prepared = canonicalize_request(request)
+        return prepared, PolicyRouter(self.statuses()).decide(prepared)
 
     def run(self, request: RunRequest) -> tuple[RoutingDecision, EngineResult, str]:
+        request, decision = self.prepare(request)
         started = time.time()
-        decision = self.decide(request)
         self.store.append_audit(
             "route.selected", decision.engine,
             {

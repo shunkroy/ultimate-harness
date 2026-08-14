@@ -11,6 +11,23 @@ from .kernel.contracts import ExecutionOutcome, ExecutionPlan, ExecutionRequest
 from .models import EngineResult, RoutingDecision, RunRequest
 
 
+def _runtime_evidence(result: EngineResult, plan: ExecutionPlan, *, attempts: int | None = None):
+    value = {
+        "kind": "runtime_observation", "runtime_id": plan.runtime_id,
+        "success": result.success,
+        "duration_ms": int(result.duration * 1000),
+    }
+    fingerprint = result.metadata.get("execution_config_sha256")
+    if (
+        isinstance(fingerprint, str) and len(fingerprint) == 64
+        and all(character in "0123456789abcdef" for character in fingerprint.lower())
+    ):
+        value["execution_config_sha256"] = fingerprint.lower()
+    if attempts is not None:
+        value["attempts"] = attempts
+    return (value,)
+
+
 def execution_request_from_legacy(request: RunRequest, *, task_id: str | None = None) -> ExecutionRequest:
     return ExecutionRequest(
         task_id=task_id or uuid.uuid4().hex,
@@ -23,6 +40,7 @@ def execution_request_from_legacy(request: RunRequest, *, task_id: str | None = 
         constraints={
             "engine": request.engine, "agent": request.agent, "model": request.model,
             "provider": request.provider, "timeout": request.timeout, "cwd": request.cwd,
+            "cwd_identity": list(getattr(request, "cwd_identity", ()) or ()),
             "sensitive": request.sensitive, "untrusted": request.untrusted,
             "no_fallback": request.no_fallback, "dry_run": request.dry_run,
             "retries": request.retries,
@@ -71,11 +89,7 @@ class LegacyRuntimeDriver:
             success=self.last_result.success,
             output=self.last_result.text,
             error_code=self.last_result.error_code,
-            evidence=({
-                "kind": "runtime_observation", "runtime_id": plan.runtime_id,
-                "success": self.last_result.success,
-                "duration_ms": int(self.last_result.duration * 1000),
-            },),
+            evidence=_runtime_evidence(self.last_result, plan),
         )
 
 
@@ -127,10 +141,8 @@ class GovernedLegacyRuntimeDriver(LegacyRuntimeDriver):
             success=self.last_result.success,
             output=self.last_result.text,
             error_code=self.last_result.error_code,
-            evidence=({
-                "kind": "runtime_observation", "runtime_id": plan.runtime_id,
-                "success": self.last_result.success,
-                "duration_ms": int(self.last_result.duration * 1000),
-                "attempts": int(self.last_result.metadata.get("attempts", 1)),
-            },),
+            evidence=_runtime_evidence(
+                self.last_result, plan,
+                attempts=int(self.last_result.metadata.get("attempts", 1)),
+            ),
         )

@@ -112,12 +112,15 @@ def cmd_platform(args) -> int:
     p = config.platform
     payload = {
         "kind": p.kind.value,
+        "platform": p.platform_id,
         "home": str(p.home),
         "state_dir": str(p.state_dir),
         "config_dir": str(p.config_dir),
         "cache_dir": str(p.cache_dir),
         "runtime_dir": str(p.runtime_dir),
         "supports_unix_supervision": p.supports_unix_supervision,
+        "capabilities": p.capability_map(),
+        "execution_profile": config.execution_profile(),
         "executables": {
             "opencode": config.opencode_bin,
             "prime": config.prime_launcher,
@@ -602,7 +605,7 @@ def cmd_log(args) -> int:
 
 
 def cmd_jobs(args) -> int:
-    _, _, _, orchestrator, manager = jobs_runtime()
+    _, _, _, _orchestrator, manager = jobs_runtime()
     if args.action == "submit":
         request = RunRequest(
             args.prompt, engine=args.engine, agent=args.agent, model=args.model,
@@ -611,11 +614,10 @@ def cmd_jobs(args) -> int:
             no_fallback=args.no_fallback, retries=args.retries,
         )
         try:
-            orchestrator.decide(request)
+            job_id = manager.submit(request, max_attempts=args.max_attempts)
         except PolicyRefusal as exc:
             print(f"policy refusal: {exc}", file=sys.stderr)
             return 2
-        job_id = manager.submit(request, max_attempts=args.max_attempts)
         emit({"id": job_id, "status": "queued"}, args.json)
         return 0
     if args.action == "list":

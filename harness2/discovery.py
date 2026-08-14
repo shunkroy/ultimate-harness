@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Mapping, Optional, Sequence, Tuple
+
+from .execution import ProcessRequest, ProcessSpawnError, run_process, secret_environment_keys
 
 from .kernel.contracts import (
     CapabilityEvidence,
@@ -30,6 +31,7 @@ class CliProbeSpec:
     capabilities: Tuple[str, ...]
     auth_names: Tuple[str, ...] = ()
     limitations: Tuple[str, ...] = ()
+    command_prefix: Tuple[str, ...] = ()
     timeout: int = 5
 
     def __post_init__(self) -> None:
@@ -68,12 +70,16 @@ def probe_cli(spec: CliProbeSpec, *, env: Optional[Mapping[str, str]] = None) ->
             False, Health.DOWN, (evidence,),
         )
     try:
-        proc = subprocess.run(
-            [path, *spec.version_args], capture_output=True, text=True,
-            timeout=spec.timeout, env=dict(env) if env is not None else None,
-        )
+        process_env = dict(env) if env is not None else dict(os.environ)
+        prefix = spec.command_prefix or (path,)
+        proc = run_process(ProcessRequest(
+            tuple((*prefix, *spec.version_args)), env=process_env,
+            cwd=os.getcwd(), timeout=spec.timeout,
+            stdout_limit=64 * 1024, stderr_limit=64 * 1024,
+            secret_env_keys=secret_environment_keys(process_env),
+        ))
         text = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()[:500]
-        healthy = proc.returncode == 0
+        healthy = proc.returncode == 0 and not proc.timed_out and not proc.output_limited
         observed = CapabilityEvidence(
             EvidenceKind.LOCAL_OBSERVATION, path, _now(),
             f"version probe exit={proc.returncode}",
@@ -85,7 +91,7 @@ def probe_cli(spec: CliProbeSpec, *, env: Optional[Mapping[str, str]] = None) ->
             Health.HEALTHY if healthy else Health.DEGRADED,
             (evidence, observed),
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, ProcessSpawnError, ValueError) as exc:
         failed = CapabilityEvidence(
             EvidenceKind.LOCAL_OBSERVATION, path, _now(),
             f"version probe failed: {type(exc).__name__}",
@@ -127,4 +133,8 @@ def default_specs(config) -> tuple[CliProbeSpec, ...]:
 
 def discover(config) -> tuple[RuntimeDescriptor, ...]:
     env = config.clean_env("local")
-    return tuple(probe_cli(spec, env=env) for spec in default_specs(config))
+    values = []
+    for spec in default_specs(config):
+        prefix = tuple(config.platform.command_prefix(spec.executable)) if spec.executable else ()
+        values.append(probe_cli(replace(spec, command_prefix=prefix), env=env))
+    return tuple(values)

@@ -76,13 +76,13 @@ class AlwaysActiveTests(unittest.TestCase):
         with open(launcher, "w", encoding="utf-8") as fh:
             fh.write("#!/usr/bin/env python3\n")
         os.chmod(launcher, 0o700)
-        with patch.dict(os.environ, {"HARNESS_LAUNCHER": launcher}), patch(
-            "harness2.service.supervisor.pid_alive", return_value=True,
-        ), patch(
-            "harness2.service.supervisor.read_cmdline",
-            return_value=[self.config.python_bin, launcher, "supervise", "--interval", "30"],
-        ):
-            self.assertTrue(service_process_matches(self.config, 1234))
+        with patch.dict(os.environ, {"HARNESS_LAUNCHER": launcher}):
+            config = HarnessConfig(state_root=self.config.state_root)
+            with patch("harness2.service.supervisor.pid_alive", return_value=True), patch(
+                "harness2.service.supervisor.read_cmdline",
+                return_value=[config.python_bin, launcher, "supervise", "--interval", "30"],
+            ):
+                self.assertTrue(service_process_matches(config, 1234))
 
     def test_service_cycle_processes_bounded_run_and_context_work(self):
         prime = Mock()

@@ -10,6 +10,7 @@ import ipaddress
 import os
 import platform as _platform
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -25,6 +26,12 @@ class PlatformKind(str, Enum):
     LINUX = "linux"
     TERMUX = "termux"
     PROOT = "proot"
+
+
+class PlatformCapabilityState(str, Enum):
+    SUPPORTED = "supported"
+    NOT_IMPLEMENTED = "not_implemented"
+    NOT_APPLICABLE = "not_applicable"
 
 
 EXECUTABLE_ENV = {
@@ -47,6 +54,7 @@ class PlatformInfo:
     cache_dir: Path
     runtime_dir: Path
     env: Mapping[str, str] = field(repr=False, compare=False)
+    credentials: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def is_windows(self) -> bool:
@@ -66,6 +74,31 @@ class PlatformInfo:
     @property
     def is_android(self) -> bool:
         return self.kind in {PlatformKind.TERMUX, PlatformKind.PROOT}
+
+    @property
+    def platform_id(self) -> str:
+        return {
+            PlatformKind.TERMUX: "android-termux",
+            PlatformKind.PROOT: "android-proot",
+        }.get(self.kind, self.kind.value)
+
+    def capability_map(self) -> Dict[str, str]:
+        """Truthful platform primitives, independent from optional providers."""
+        supported = PlatformCapabilityState.SUPPORTED.value
+        android_only = (
+            PlatformCapabilityState.NOT_IMPLEMENTED.value
+            if self.is_android else PlatformCapabilityState.NOT_APPLICABLE.value
+        )
+        return {
+            "filesystem": supported,
+            "shell": supported,
+            "provider_cli": supported,
+            "network": supported,
+            "process_spawn": supported,
+            "persistent_storage": supported,
+            "notifications": android_only,
+            "android_bridge": android_only,
+        }
 
     def candidates(self, name: str) -> list[str]:
         home = self.home
@@ -103,8 +136,9 @@ class PlatformInfo:
         override = self.env.get(EXECUTABLE_ENV.get(name, ""), "")
         if override:
             candidate = os.path.expandvars(os.path.expanduser(override))
-            if _usable_executable(candidate, self):
-                return os.path.abspath(candidate)
+            resolved = _canonical_executable(candidate, self)
+            if resolved:
+                return resolved
             if required:
                 raise FileNotFoundError(f"configured {name} executable is unavailable: {candidate}")
             return None
@@ -117,17 +151,22 @@ class PlatformInfo:
             "python": ("python3", "python"),
             "openssl": ("openssl",),
         }.get(name, (name,))
-        path = self.env.get("PATH") or os.environ.get("PATH", "")
+        path = self.env["PATH"] if "PATH" in self.env else os.environ.get("PATH", "")
         for command in search_names:
             found = shutil.which(command, path=path)
-            if found:
-                return os.path.abspath(found)
+            resolved = _canonical_executable(found, self) if found else None
+            if resolved:
+                return resolved
         for candidate in self.candidates(name):
-            if _usable_executable(candidate, self):
-                return os.path.abspath(candidate)
+            resolved = _canonical_executable(candidate, self)
+            if resolved:
+                return resolved
         if required:
             raise FileNotFoundError(f"could not discover executable: {name}")
         return None
+
+    def executable(self, path: Optional[str]) -> Optional[str]:
+        return _canonical_executable(path, self) if path else None
 
     def command_prefix(self, executable: str) -> list[str]:
         suffix = Path(executable).suffix.lower()
@@ -150,11 +189,23 @@ def executable_name(name: str, info: PlatformInfo) -> str:
 
 
 def _usable_executable(path: str, info: PlatformInfo) -> bool:
-    if not os.path.isfile(path):
-        return False
+    return _canonical_executable(path, info) is not None
+
+
+def _canonical_executable(path: str, info: PlatformInfo) -> Optional[str]:
+    try:
+        expanded = os.path.expandvars(os.path.expanduser(path))
+        resolved = os.path.realpath(expanded)
+        value = os.stat(resolved)
+    except (OSError, TypeError, ValueError):
+        return None
+    if not stat.S_ISREG(value.st_mode):
+        return None
     if info.is_windows:
-        return Path(path).suffix.lower() in {".exe", ".cmd", ".bat", ".com", ".ps1", ""}
-    return os.access(path, os.X_OK)
+        # PowerShell scripts need an explicit PowerShell host. Until that
+        # launcher exists, accepting .ps1 here would make discovery lie.
+        return resolved if Path(resolved).suffix.lower() in {".exe", ".cmd", ".bat", ".com", ""} else None
+    return resolved if os.access(resolved, os.X_OK) else None
 
 
 def _safe_exists(path: Path) -> bool:
@@ -175,6 +226,10 @@ def detect_platform(
 ) -> PlatformInfo:
     raw_values = dict(os.environ if env is None else env)
     sensitive_markers = ("API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+    credentials = {
+        key: value for key, value in raw_values.items()
+        if any(marker in key.upper() for marker in sensitive_markers)
+    }
     values = {
         key: value for key, value in raw_values.items()
         if not any(marker in key.upper() for marker in sensitive_markers)
@@ -185,7 +240,7 @@ def detect_platform(
     home_path = Path(home or raw_values.get("HOME") or raw_values.get("USERPROFILE") or str(Path.home())).expanduser()
 
     prefix = raw_values.get("PREFIX", "").lower()
-    proot_hint = any(key in raw_values for key in ("PROOT_L2S_DIR", "PROOT_TMP_DIR", "PROOT_DISTRO")) or "proot" in kernel.lower()
+    proot_hint = any(raw_values.get(key) for key in ("PROOT_L2S_DIR", "PROOT_TMP_DIR", "PROOT_DISTRO")) or "proot" in kernel.lower()
     termux_hint = "com.termux" in prefix or "TERMUX_VERSION" in raw_values
 
     if family == "nt" or system.startswith("win"):
@@ -224,7 +279,7 @@ def detect_platform(
         config = Path(raw_values.get("XDG_CONFIG_HOME", str(home_path / ".config"))) / "harness2"
         cache = Path(raw_values.get("XDG_CACHE_HOME", str(home_path / ".cache"))) / "harness2"
     runtime = state / "run"
-    return PlatformInfo(kind, home_path, state, config, cache, runtime, values)
+    return PlatformInfo(kind, home_path, state, config, cache, runtime, values, credentials)
 
 
 def is_loopback_url(url: str) -> bool:

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import ast
 import os
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from harness2.discovery import CliProbeSpec, probe_cli
+from harness2.execution import run_process
 from harness2.kernel.catalog import build_catalog
 from harness2.kernel.contracts import (
     CapabilityDescriptor,
@@ -102,12 +102,13 @@ class DiscoveryTests(unittest.TestCase):
                 "provider", "Provider", executable, ("--version",),
                 "cli", "file", "json", ("code.execute",), timeout=2,
             )
-            with patch("harness2.discovery.subprocess.run", wraps=subprocess.run) as run:
+            with patch("harness2.discovery.run_process", wraps=run_process) as run:
                 value = probe_cli(spec, env={"PATH": "/usr/bin:/bin"})
             self.assertEqual(value.version, "3.4.5")
             self.assertEqual(value.health, Health.HEALTHY)
-            self.assertEqual(run.call_args.args[0], [executable, "--version"])
-            self.assertEqual(run.call_args.kwargs["timeout"], 2)
+            request = run.call_args.args[0]
+            self.assertEqual(request.argv, (executable, "--version"))
+            self.assertEqual(request.timeout, 2)
 
 
 if __name__ == "__main__":

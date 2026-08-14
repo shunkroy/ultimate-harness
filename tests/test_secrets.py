@@ -10,10 +10,15 @@ from harness2.config import HarnessConfig
 from harness2.jobs import JobManager
 from harness2.models import EngineResult, RoutingDecision, RunRequest
 from harness2.platforms import detect_platform
+from harness2.policy import canonicalize_request
 from harness2.store import Store
 
 
 class FakeOrchestrator:
+    def prepare(self, request):
+        prepared = canonicalize_request(request)
+        return prepared, RoutingDecision("opencode", "kiteretsu", "m", "test")
+
     def run(self, request):
         return RoutingDecision("opencode", "kiteretsu", "m", "test"), EngineResult("opencode", True, text="ok"), "run"
 

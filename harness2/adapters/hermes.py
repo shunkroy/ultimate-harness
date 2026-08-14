@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
 import time
 
 from .base import EngineAdapter
 from ..config import HarnessConfig
 from ..models import CapabilityStatus, EngineResult, EngineStatus, RunRequest
+from ..execution import (
+    ProcessConfigurationError,
+    ProcessRequest,
+    ProcessSpawnError,
+    prepare_working_directory,
+    run_process,
+    secret_environment_keys,
+)
 
 
 class HermesAdapter(EngineAdapter):
@@ -18,8 +24,10 @@ class HermesAdapter(EngineAdapter):
         self.config = config
 
     def status(self) -> EngineStatus:
-        available = bool(self.config.hermes_bin and os.path.isfile(self.config.hermes_bin))
-        enabled = available and os.environ.get("HARNESS_HERMES_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+        available = self.config.executable_available("hermes")
+        enabled = available and self.config.platform.env.get(
+            "HARNESS_HERMES_ENABLED", "false",
+        ).strip().lower() in {"1", "true", "yes", "on"}
         return EngineStatus(
             self.name, available, enabled, enabled,
             CapabilityStatus.IMPLEMENTED if available else CapabilityStatus.DOCUMENTED,
@@ -30,26 +38,39 @@ class HermesAdapter(EngineAdapter):
 
     def run(self, request: RunRequest) -> EngineResult:
         started = time.monotonic()
-        if not self.status().available:
+        status = self.status()
+        if not status.available:
             return EngineResult(self.name, False, error="Hermes binary is unavailable", error_code="unavailable", exit_code=1)
+        if not status.enabled:
+            return EngineResult(self.name, False, error="Hermes is disabled by policy", error_code="disabled", exit_code=2)
         try:
-            proc = subprocess.run(
-                [*self.config.command("hermes"), "chat", "-z", request.prompt],
-                env=self.config.clean_env("hermes"),
-                cwd=request.cwd or os.getcwd(),
-                capture_output=True,
-                text=True,
-                timeout=request.timeout,
+            cwd, cwd_identity = prepare_working_directory(
+                request.cwd, getattr(request, "cwd_identity", None),
             )
-        except subprocess.TimeoutExpired:
-            return EngineResult(self.name, False, error=f"timed out after {request.timeout}s", error_code="timeout", exit_code=124, duration=time.monotonic() - started)
-        except OSError as exc:
+            command = [*self.config.command("hermes"), "chat", "-z", request.prompt]
+            env = self.config.clean_env("hermes")
+            proc = run_process(ProcessRequest(
+                tuple(command), cwd=cwd, cwd_identity=cwd_identity,
+                env=env, timeout=request.timeout,
+                stdout_limit=int(self.config.stdout_limit),
+                stderr_limit=int(self.config.stderr_limit),
+                private_argv_indices=(len(command) - 1,),
+                secret_env_keys=secret_environment_keys(env),
+            ))
+        except ProcessConfigurationError as exc:
+            return EngineResult(self.name, False, error=str(exc), error_code="invalid_execution", exit_code=2, duration=time.monotonic() - started)
+        except (ProcessSpawnError, OSError) as exc:
             return EngineResult(self.name, False, error=str(exc), error_code="spawn_error", exit_code=1, duration=time.monotonic() - started)
+        if proc.timed_out:
+            return EngineResult(self.name, False, error=f"timed out after {request.timeout}s", error_code="timeout", exit_code=124, duration=proc.duration, metadata={"execution_config_sha256": proc.config_fingerprint})
+        if proc.output_limited:
+            return EngineResult(self.name, False, text=proc.stdout, error="provider output exceeded the configured byte limit", error_code="output_limit", exit_code=125, duration=proc.duration, metadata={"execution_config_sha256": proc.config_fingerprint})
         output = (proc.stdout or "").strip()
         error = None if proc.returncode == 0 else (proc.stderr or output or "Hermes failed").strip()
         return EngineResult(
             self.name, proc.returncode == 0 and bool(output), output,
             error, None if proc.returncode == 0 else "process_error",
             proc.returncode if proc.returncode else (0 if output else 2),
-            time.monotonic() - started,
+            proc.duration,
+            metadata={"execution_config_sha256": proc.config_fingerprint},
         )

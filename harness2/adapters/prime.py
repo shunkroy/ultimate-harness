@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import time
 
 from .base import EngineAdapter
 from ..config import HarnessConfig
 from ..events import parse_text
+from ..execution import (
+    ProcessConfigurationError,
+    ProcessRequest,
+    ProcessResult,
+    ProcessSpawnError,
+    canonical_working_directory,
+    prepare_working_directory,
+    run_process,
+    secret_environment_keys,
+)
 from ..models import CapabilityStatus, EngineResult, EngineStatus, RunRequest
 from .. import supervisor
 from ..security import PrivateTempFile, ensure_private_dir
@@ -35,7 +44,7 @@ class PrimeAdapter(EngineAdapter):
         )
 
     def status(self) -> EngineStatus:
-        installed = bool(self.config.prime_launcher and os.path.isfile(self.config.prime_launcher))
+        installed = self.config.executable_available("prime")
         try:
             daemon = self.daemon_status() if self.config.hardened_prime_available else None
             healthy = bool(daemon and daemon.healthy)
@@ -86,6 +95,21 @@ class PrimeAdapter(EngineAdapter):
 
     def run(self, request: RunRequest) -> EngineResult:
         started = time.monotonic()
+        if not self.status().available:
+            return EngineResult(
+                self.name, False, error="Prime CLI is unavailable",
+                error_code="unavailable", exit_code=1,
+                duration=time.monotonic() - started,
+            )
+        try:
+            requested_cwd, requested_identity = prepare_working_directory(
+                request.cwd, getattr(request, "cwd_identity", None),
+            )
+        except ProcessConfigurationError as exc:
+            return EngineResult(
+                self.name, False, error=str(exc), error_code="invalid_execution",
+                exit_code=2, duration=time.monotonic() - started,
+            )
         if self.config.hardened_prime_available:
             try:
                 daemon = self.daemon_status()
@@ -93,38 +117,58 @@ class PrimeAdapter(EngineAdapter):
                     self.start()
             except Exception as exc:
                 return EngineResult(self.name, False, error=f"Prime daemon start failed: {exc}", error_code="daemon_unavailable", exit_code=1, duration=time.monotonic() - started)
-        if not self.config.prime_launcher:
-            return EngineResult(self.name, False, error="Prime CLI is unavailable", error_code="unavailable", exit_code=1)
-        argv = [
-            *self.config.command("prime"),
-        ]
-        if self.config.hardened_prime_available:
-            argv.append("--dist")
-        argv += ["-p", "--mode", "json"]
-        if request.provider:
-            argv += ["--provider", request.provider]
-        if request.model:
-            argv += ["--model", request.model]
-        if request.cwd:
-            argv += ["--cwd", request.cwd]
-        if self.config.hardened_prime_available:
-            argv += ["--daemon-socket", self.config.prime_socket]
-        temp_dir = ensure_private_dir(os.path.join(str(self.config.state_root), "tmp"))
         try:
+            process_cwd, process_identity = prepare_working_directory(
+                str(self.config.prime_repo)
+                if os.path.isdir(str(self.config.prime_repo)) else requested_cwd
+            )
+            argv = [*self.config.command("prime")]
+            if self.config.hardened_prime_available:
+                argv.append("--dist")
+            argv += ["-p", "--mode", "json"]
+            if request.provider:
+                argv += ["--provider", request.provider]
+            if request.model:
+                argv += ["--model", request.model]
+            argv += ["--cwd", requested_cwd]
+            if self.config.hardened_prime_available:
+                argv += ["--daemon-socket", self.config.prime_socket]
+            temp_dir = ensure_private_dir(os.path.join(str(self.config.state_root), "tmp"))
             with PrivateTempFile(temp_dir, request.prompt.encode("utf-8")) as prompt_file:
-                proc = subprocess.run(
-                    [*argv, "@" + prompt_file, "Execute the complete user request in the attached private task file."],
-                    cwd=str(self.config.prime_repo) if os.path.isdir(str(self.config.prime_repo)) else (request.cwd or os.getcwd()),
-                    env=self.config.clean_env("prime", provider=request.provider, model=request.model, daemon=True),
-                    capture_output=True,
-                    text=True,
-                    timeout=request.timeout,
+                command = [
+                    *argv, "@" + prompt_file,
+                    "Execute the complete user request in the attached private task file.",
+                ]
+                env = self.config.clean_env(
+                    "prime", provider=request.provider, model=request.model, daemon=True,
                 )
-        except subprocess.TimeoutExpired:
-            return EngineResult(self.name, False, error=f"timed out after {request.timeout}s", error_code="timeout", exit_code=124, duration=time.monotonic() - started)
-        except OSError as exc:
+                proc = run_process(ProcessRequest(
+                    tuple(command), cwd=process_cwd, cwd_identity=process_identity, env=env,
+                    timeout=request.timeout,
+                    stdout_limit=int(self.config.stdout_limit),
+                    stderr_limit=int(self.config.stderr_limit),
+                    private_argv_indices=(len(command) - 2,),
+                    secret_env_keys=secret_environment_keys(env),
+                    additional_cwd_authorities=((requested_cwd, requested_identity),),
+                ))
+        except ProcessConfigurationError as exc:
+            return EngineResult(self.name, False, error=str(exc), error_code="invalid_execution", exit_code=2, duration=time.monotonic() - started)
+        except (ProcessSpawnError, OSError) as exc:
             return EngineResult(self.name, False, error=str(exc), error_code="spawn_error", exit_code=1, duration=time.monotonic() - started)
-        parsed = parse_text("prime", proc.stdout or "")
+        if proc.timed_out:
+            return EngineResult(
+                self.name, False, error=f"timed out after {request.timeout}s",
+                error_code="timeout", exit_code=124, duration=proc.duration,
+                metadata={"execution_config_sha256": proc.config_fingerprint},
+            )
+        if proc.output_limited:
+            return EngineResult(
+                self.name, False, text=proc.stdout,
+                error="provider output exceeded the configured byte limit",
+                error_code="output_limit", exit_code=125, duration=proc.duration,
+                metadata={"execution_config_sha256": proc.config_fingerprint},
+            )
+        parsed = parse_text("prime", proc.stdout or "", strict=True)
         error, code = parsed.error, parsed.error_code
         if proc.returncode != 0 and not error:
             error, code = (proc.stderr or "Prime exited unsuccessfully").strip()[-800:], "process_error"
@@ -135,10 +179,13 @@ class PrimeAdapter(EngineAdapter):
             self.name, success, parsed.text, error, code,
             0 if success else (proc.returncode or 1), time.monotonic() - started,
             parsed.session_id, parsed.raw_event_count,
-            {"malformed_events": parsed.malformed_count},
+            {
+                "malformed_events": parsed.malformed_count,
+                "execution_config_sha256": proc.config_fingerprint,
+            },
         )
 
-    def passthrough(self, args: list[str], timeout: int = 180) -> subprocess.CompletedProcess:
+    def passthrough(self, args: list[str], timeout: int = 180) -> ProcessResult:
         if not self.config.prime_launcher:
             raise FileNotFoundError("Prime CLI is unavailable")
         argv = [*self.config.command("prime")]
@@ -146,11 +193,13 @@ class PrimeAdapter(EngineAdapter):
             argv += ["--dist", *args, "--daemon-socket", self.config.prime_socket]
         else:
             argv += args
-        return subprocess.run(
-            argv,
-            cwd=str(self.config.prime_repo) if os.path.isdir(str(self.config.prime_repo)) else os.getcwd(),
-            env=self.config.clean_env("prime", daemon=True),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+        cwd = canonical_working_directory(
+            str(self.config.prime_repo) if os.path.isdir(str(self.config.prime_repo)) else None
         )
+        env = self.config.clean_env("prime", daemon=True)
+        return run_process(ProcessRequest(
+            tuple(argv), cwd=cwd, env=env, timeout=timeout,
+            stdout_limit=int(self.config.stdout_limit),
+            stderr_limit=int(self.config.stderr_limit),
+            secret_env_keys=secret_environment_keys(env),
+        ))

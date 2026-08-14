@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import replace
 
 from .kernel.application import ApplicationKernel
 from .kernel.catalog import build_catalog
@@ -35,7 +36,7 @@ class ForegroundExecutionService:
             return self.orchestrator.run(request)
 
         started = time.time()
-        decision = self.orchestrator.decide(request)
+        request, decision = self.orchestrator.prepare(request)
         self.store.append_audit(
             "route.selected", decision.engine,
             {
@@ -51,13 +52,7 @@ class ForegroundExecutionService:
         adapter = self.engines.get(decision.engine)
         if adapter is None:
             raise RuntimeError(f"runtime adapter unavailable: {decision.engine}")
-        routed_request = request.__class__(
-            prompt=request.prompt, engine=request.engine,
-            agent=decision.agent, model=decision.model, provider=request.provider,
-            timeout=request.timeout, cwd=request.cwd, sensitive=request.sensitive,
-            untrusted=request.untrusted, no_fallback=request.no_fallback,
-            dry_run=request.dry_run, retries=request.retries,
-        )
+        routed_request = replace(request, agent=decision.agent, model=decision.model)
         breaker_key = self.orchestrator.breaker_key(decision.engine, routed_request, decision)
         driver = GovernedLegacyRuntimeDriver(
             adapter, routed_request, self.orchestrator.breakers, breaker_key,

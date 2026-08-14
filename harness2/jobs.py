@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 import time
 import uuid
@@ -13,6 +14,7 @@ from .config import HarnessConfig
 from .crypto import atomic_write_envelope, decrypt, encrypt, load_or_create_key
 from .models import RunRequest
 from .orchestrator import Orchestrator
+from .policy import restore_request_authority
 from .security import ensure_private_dir, redact, task_hash
 from .store import Store
 from . import secrets as secret_store
@@ -43,7 +45,31 @@ class JobManager:
             store, self.events, self.tasks, self.objects, default_task_types(),
         )
 
+    def _payload_file(self, stored: object, job_id: str) -> str:
+        """Resolve legacy absolute payload paths without granting DB path authority."""
+        if not isinstance(stored, str) or not stored or "\x00" in stored:
+            raise RuntimeError("job payload path is invalid")
+        basename = ntpath.basename(stored)
+        if basename != f"{job_id}.bin" or basename != os.path.basename(basename):
+            raise RuntimeError("job payload path is invalid")
+        expected_parent = ntpath.basename(ntpath.dirname(stored)).lower()
+        if expected_parent != "jobs":
+            raise RuntimeError("job payload path is outside the jobs namespace")
+        candidate = os.path.realpath(os.path.join(self.jobs_dir, basename))
+        jobs_root = os.path.realpath(self.jobs_dir)
+        try:
+            inside = os.path.commonpath((candidate, jobs_root)) == jobs_root
+        except ValueError:
+            inside = False
+        if not inside:
+            raise RuntimeError("job payload path escapes the jobs directory")
+        return candidate
+
     def submit(self, request: RunRequest, max_attempts: int = 3) -> str:
+        # Preparation is authoritative and happens before any payload or row is
+        # created. The canonical path and filesystem identity then survive a
+        # service restart instead of being recaptured by the worker.
+        request, _decision = self.orchestrator.prepare(request)
         job_id = uuid.uuid4().hex
         payload_path = os.path.join(self.jobs_dir, job_id + ".bin")
         payload = json.dumps({"prompt": request.prompt}, ensure_ascii=False).encode("utf-8")
@@ -62,6 +88,7 @@ class JobManager:
                 "engine": request.engine, "agent": request.agent,
                 "model": request.model, "provider": request.provider,
                 "timeout": request.timeout, "cwd": request.cwd,
+                "cwd_identity": list(getattr(request, "cwd_identity", ()) or ()),
                 "sensitive": request.sensitive, "untrusted": request.untrusted,
                 "no_fallback": request.no_fallback,
                 "retries": request.retries,
@@ -109,7 +136,7 @@ class JobManager:
                 )
         except Exception:
             try:
-                os.unlink(payload_path)
+                os.unlink(self._payload_file(payload_path, job_id))
             except FileNotFoundError:
                 pass
             raise
@@ -264,15 +291,45 @@ class JobManager:
             raise RuntimeError("unmapped legacy jobs are quarantined")
         payload = self.execution_state.load_task_payload(str(job["typed_task_id"]))
         values = payload.constraints
-        return RunRequest(
+        task = self.tasks.get(str(job["typed_task_id"]))
+        if task is None or json.dumps(
+            dict(task.constraints), sort_keys=True, separators=(",", ":")
+        ) != json.dumps(
+            payload.as_dict()["constraints"], sort_keys=True, separators=(",", ":")
+        ):
+            raise RuntimeError("durable job constraint projections disagree")
+        cwd = values.get("cwd")
+        identity = values.get("cwd_identity")
+        projections = {
+            "engine": str(values.get("engine", "auto")),
+            "agent": values.get("agent"),
+            "model": values.get("model"),
+            "provider": values.get("provider"),
+            "timeout": int(values.get("timeout", 240)),
+            "cwd": cwd,
+            "sensitive": int(bool(values.get("sensitive", False))),
+            "untrusted": int(bool(values.get("untrusted", False))),
+            "no_fallback": int(bool(values.get("no_fallback", False))),
+            "retries": int(values.get("retries", 1)),
+        }
+        if (
+            not isinstance(cwd, str) or not os.path.isabs(cwd)
+            or not isinstance(identity, tuple) or len(identity) != 2
+            or any(isinstance(item, bool) or not isinstance(item, int) for item in identity)
+            or any(job.get(key) != expected for key, expected in projections.items())
+            or job.get("task_hash") != task_hash(payload.objective)
+        ):
+            raise RuntimeError("durable job authority projections are invalid")
+        restored = RunRequest(
             prompt=payload.objective, engine=str(values.get("engine", "auto")),
             agent=values.get("agent"), model=values.get("model"),
             provider=values.get("provider"), timeout=int(values.get("timeout", 240)),
-            cwd=values.get("cwd"), sensitive=bool(values.get("sensitive", False)),
+            cwd=cwd, sensitive=bool(values.get("sensitive", False)),
             untrusted=bool(values.get("untrusted", False)),
             no_fallback=bool(values.get("no_fallback", False)),
             retries=int(values.get("retries", 1)),
         )
+        return restore_request_authority(restored, (identity[0], identity[1]))
 
     def work_once(self) -> Optional[Dict[str, Any]]:
         job = self.claim()
@@ -345,7 +402,7 @@ class JobManager:
             raise RuntimeError("unfenced legacy completion is disabled")
         if success:
             try:
-                os.unlink(job["payload_path"])
+                os.unlink(self._payload_file(job["payload_path"], str(job_id)))
             except FileNotFoundError:
                 pass
         self.store.append_audit(f"job.{status}", job_id, {"error_code": error_code or "", "run_id": run_id or ""})
@@ -374,6 +431,7 @@ class JobManager:
             row = con.execute("SELECT payload_path,status FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not row or row["status"] not in {"queued", "retry"}:
                 return False
+            payload_file = self._payload_file(row["payload_path"], job_id)
             mapping = con.execute(
                 "SELECT task_id FROM kernel_legacy_job_tasks WHERE job_id=?", (job_id,),
             ).fetchone()
@@ -404,7 +462,7 @@ class JobManager:
                 )
             con.execute("UPDATE jobs SET status='cancelled',updated_at=? WHERE id=?", (time.time(), job_id))
         try:
-            os.unlink(row["payload_path"])
+            os.unlink(payload_file)
         except FileNotFoundError:
             pass
         self.store.append_audit("job.cancelled", job_id, {})
@@ -448,10 +506,11 @@ class JobManager:
             row = con.execute("SELECT payload_path,status FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not row or row["status"] == "running":
                 return False
+            payload_file = self._payload_file(row["payload_path"], job_id)
             con.execute("DELETE FROM kernel_legacy_job_tasks WHERE job_id=?", (job_id,))
             con.execute("DELETE FROM jobs WHERE id=?", (job_id,))
         try:
-            os.unlink(row["payload_path"])
+            os.unlink(payload_file)
         except FileNotFoundError:
             pass
         return True

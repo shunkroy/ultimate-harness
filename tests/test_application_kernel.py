@@ -187,6 +187,11 @@ class OrchestratorStub:
     def decide(self, request):
         return RoutingDecision("opencode", "inventor", None, "explicit", (), "explicit")
 
+    def prepare(self, request):
+        from harness2.policy import canonicalize_request
+        prepared = canonicalize_request(request)
+        return prepared, self.decide(prepared)
+
     def statuses(self):
         return {"opencode": self.adapter.status()}
 

@@ -10,16 +10,12 @@ from dataclasses import dataclass
 from typing import Mapping, Protocol
 
 from .contracts import ExecutionOutcome, ExecutionPlan, ExecutionRequest, Health, Maturity
-from .registry import CapabilityRegistry, RuntimeRegistry
+from .registry import CapabilityRegistry, RuntimeDriver, RuntimeRegistry
 from .tasks import AttemptLease, TaskRecord, TaskRepository, TaskState
 
 
 class KernelExecutionError(RuntimeError):
     pass
-
-
-class RuntimeDriver(Protocol):
-    def execute(self, request: ExecutionRequest, plan: ExecutionPlan) -> ExecutionOutcome: ...
 
 
 class Planner(Protocol):

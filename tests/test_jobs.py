@@ -13,6 +13,7 @@ from harness2.crypto import CryptoError, decrypt, encrypt, load_or_create_key
 from harness2.jobs import JobManager
 from harness2.kernel.tasks import StaleLeaseError, TaskState
 from harness2.models import EngineResult, RoutingDecision, RunRequest
+from harness2.policy import canonicalize_request
 from harness2.service import rotate
 from harness2.store import Store
 
@@ -20,6 +21,11 @@ from harness2.store import Store
 class FakeOrchestrator:
     def __init__(self, success=True):
         self.success = success
+
+    def prepare(self, request):
+        prepared = canonicalize_request(request)
+        engine = prepared.engine if prepared.engine != "auto" else "opencode"
+        return prepared, RoutingDecision(engine, "kiteretsu", "free", "test")
 
     def run(self, request):
         result = EngineResult(
@@ -76,6 +82,35 @@ class JobTests(unittest.TestCase):
         self.assertNotIn(prompt, repr(manager.list()))
         self.assertNotIn(prompt, repr(manager.show(job_id)))
 
+    def test_submit_persists_canonical_cwd_and_identity(self):
+        manager = self.manager()
+        workspace = os.path.join(self.tmp.name, "workspace")
+        os.mkdir(workspace)
+        job_id = manager.submit(RunRequest("secret", engine="opencode", cwd=workspace + "/../workspace"))
+        claimed = manager.claim()
+        loaded = manager._load_request(claimed)
+        expected = os.path.realpath(workspace)
+        self.assertEqual(loaded.cwd, expected)
+        self.assertEqual(loaded.cwd_identity, (os.stat(expected).st_dev, os.stat(expected).st_ino))
+        with self.store.connect() as con:
+            row = con.execute("SELECT cwd FROM jobs WHERE id=?", (job_id,)).fetchone()
+        self.assertEqual(row[0], expected)
+
+    def test_default_cwd_is_materialized_before_persistence(self):
+        manager = self.manager()
+        job_id = manager.submit(RunRequest("secret", engine="opencode"))
+        shown = manager.show(job_id)
+        self.assertEqual(shown["cwd"], os.path.realpath(os.getcwd()))
+
+    def test_cwd_projection_mismatch_is_rejected(self):
+        manager = self.manager()
+        job_id = manager.submit(RunRequest("secret", engine="opencode"))
+        with self.store.connect() as con:
+            con.execute("UPDATE jobs SET cwd=? WHERE id=?", (self.tmp.name, job_id))
+        claimed = manager.claim()
+        with self.assertRaisesRegex(RuntimeError, "authority projections"):
+            manager._load_request(claimed)
+
     def test_work_success_deletes_payload(self):
         manager = self.manager(True)
         job_id = manager.submit(RunRequest("secret", engine="opencode"))
@@ -106,6 +141,40 @@ class JobTests(unittest.TestCase):
             path = con.execute("SELECT payload_path FROM jobs WHERE id=?", (job_id,)).fetchone()[0]
         self.assertTrue(manager.cancel(job_id))
         self.assertFalse(os.path.exists(path))
+
+    def test_payload_paths_relocate_only_within_jobs_namespace(self):
+        manager = self.manager()
+        expected = os.path.join(manager.jobs_dir, "a" * 32 + ".bin")
+        self.assertEqual(
+            manager._payload_file("C:\\old-phone\\state\\jobs\\" + "a" * 32 + ".bin", "a" * 32),
+            os.path.realpath(expected),
+        )
+        with self.assertRaises(RuntimeError):
+            manager._payload_file(os.path.join(self.tmp.name, "outside.bin"), "a" * 32)
+
+    def test_job_cannot_delete_another_jobs_payload(self):
+        manager = self.manager()
+        first = manager.submit(RunRequest("first"))
+        second = manager.submit(RunRequest("second"))
+        second_path = os.path.join(manager.jobs_dir, second + ".bin")
+        with self.store.connect() as con:
+            con.execute("UPDATE jobs SET payload_path=? WHERE id=?", (second_path, first))
+        with self.assertRaises(RuntimeError):
+            manager.cancel(first)
+        self.assertTrue(os.path.isfile(second_path))
+
+    def test_tampered_payload_path_cannot_delete_outside_jobs(self):
+        manager = self.manager()
+        job_id = manager.submit(RunRequest("secret"))
+        sentinel = os.path.join(self.tmp.name, "sentinel.bin")
+        with open(sentinel, "wb") as stream:
+            stream.write(b"keep")
+        with self.store.connect() as con:
+            con.execute("UPDATE jobs SET payload_path=? WHERE id=?", (sentinel, job_id))
+        with self.assertRaises(RuntimeError):
+            manager.cancel(job_id)
+        self.assertTrue(os.path.isfile(sentinel))
+        self.assertEqual(manager.show(job_id)["status"], "queued")
 
     def test_submit_and_completion_share_typed_fenced_state(self):
         manager = self.manager(True)
