@@ -55,6 +55,8 @@ class EngineStatus:
     detail: str = ""
     capabilities: Tuple[str, ...] = ()
     prompt_transport: str = "unknown"
+    #: free | subscription | paid-api | private | mixed | unknown
+    cost_class: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -65,3 +67,8 @@ class RoutingDecision:
     reason: str
     fallbacks: Tuple[str, ...] = ()
     task_class: str = "general"
+    #: Full ordered candidate route (primary first) when known at decision
+    #: time; empty means "derive from fallbacks".
+    candidates: Tuple[str, ...] = ()
+    #: (engine, reason) pairs for engines considered and excluded.
+    skipped: Tuple[Tuple[str, str], ...] = ()

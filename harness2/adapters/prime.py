@@ -21,6 +21,7 @@ from ..execution import (
 from ..models import CapabilityStatus, EngineResult, EngineStatus, RunRequest
 from .. import supervisor
 from ..security import PrivateTempFile, ensure_private_dir
+from .manifest import RuntimeManifest
 
 
 class PrimeAdapter(EngineAdapter):
@@ -28,6 +29,19 @@ class PrimeAdapter(EngineAdapter):
 
     def __init__(self, config: HarnessConfig):
         self.config = config
+
+    def manifest(self) -> RuntimeManifest:
+        return RuntimeManifest(
+            id=self.name,
+            capabilities=("reason.general", "durable-sessions", "ipython-kernel", "recursive-subagents", "scheduling"),
+            auth_mechanisms=("env", "user-authorized"),
+            auth_configured=True,
+            cost_class="mixed",
+            privacy_class="external",
+            models=(),
+            health_probe="daemon_status()",
+            execution_contract="prime-agent.sh -p --mode json (daemon socket)",
+        )
 
     def daemon_status(self) -> supervisor.DaemonStatus:
         if not self.config.hardened_prime_available:

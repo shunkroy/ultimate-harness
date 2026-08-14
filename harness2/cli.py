@@ -345,6 +345,10 @@ def cmd_providers(args) -> int:
             "runtimes": [item.as_dict() for item in runtimes.all()],
             "capabilities": [item.as_dict() for item in capabilities.all()],
             "validation_errors": list(capabilities.validate(runtimes)),
+            "manifests": {
+                name: engine.manifest().as_dict()
+                for name, engine in sorted(orchestrator.engines.items())
+            },
         }
     emit(values, args.json)
     return 0

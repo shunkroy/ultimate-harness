@@ -8,6 +8,7 @@ from typing import Dict, Optional
 
 from .models import EngineStatus, RoutingDecision, RunRequest
 from .execution import ProcessConfigurationError, prepare_working_directory
+from .router import assemble_candidates
 
 
 _DURABLE = ("long-running", "long running", "background agent", "persistent", "ipython", "recursive subagent", "schedule", "heartbeat", "detach", "reattach", "rlm")
@@ -125,6 +126,7 @@ class PolicyRouter:
             return RoutingDecision(
                 request.engine, request.agent or chosen_agent, request.model or model,
                 "explicit engine selection", (), "explicit",
+                (request.engine,),
             )
 
         if any(token in text for token in _MESSAGING):
@@ -134,18 +136,32 @@ class PolicyRouter:
 
         if any(token in text for token in _PARALLEL):
             if self._usable("hermes"):
-                return RoutingDecision("hermes", None, None, "parallel worker policy", ("opencode",), "parallel")
+                route = assemble_candidates("hermes", self.statuses)
+                return RoutingDecision(
+                    "hermes", None, None, "parallel worker policy",
+                    tuple(c for c in route.candidates if c != "hermes"),
+                    "parallel", route.candidates, route.skipped,
+                )
 
         if any(token in text for token in _DURABLE):
             if self._usable("prime"):
-                return RoutingDecision("prime", None, request.model, "durable/RLM capability required", ("opencode",), "durable")
+                route = assemble_candidates("prime", self.statuses)
+                return RoutingDecision(
+                    "prime", None, request.model, "durable/RLM capability required",
+                    tuple(c for c in route.candidates if c != "prime"),
+                    "durable", route.candidates, route.skipped,
+                )
 
         if not self._usable("opencode"):
             if self._usable("prime"):
                 return RoutingDecision("prime", None, request.model, "OpenCode unavailable", (), "fallback")
-            raise PolicyRefusal("no healthy external engine is available")
 
+        route = assemble_candidates("opencode", self.statuses)
+        if not route.candidates:
+            raise PolicyRefusal("no healthy external engine is available")
         return RoutingDecision(
             "opencode", request.agent or agent, request.model or model,
-            "OpenCode control-plane policy; " + expert_reason, (), "control",
+            "OpenCode control-plane policy; " + expert_reason,
+            tuple(c for c in route.candidates if c != "opencode"),
+            "control", route.candidates, route.skipped,
         )

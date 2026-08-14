@@ -15,6 +15,7 @@ from ..execution import (
     run_process,
     secret_environment_keys,
 )
+from .manifest import RuntimeManifest
 
 
 class HermesAdapter(EngineAdapter):
@@ -22,6 +23,20 @@ class HermesAdapter(EngineAdapter):
 
     def __init__(self, config: HarnessConfig):
         self.config = config
+
+    def manifest(self) -> RuntimeManifest:
+        return RuntimeManifest(
+            id=self.name,
+            capabilities=("reason.general", "parallel-worker", "messaging", "gateway"),
+            auth_mechanisms=("env", "user-authorized"),
+            auth_configured=False,
+            cost_class="mixed",
+            privacy_class="external",
+            models=(),
+            health_probe="status()",
+            execution_contract="hermes chat -z <prompt> (argv-visible transport)",
+            evidence=("disabled pending authorized provider",),
+        )
 
     def status(self) -> EngineStatus:
         available = self.config.executable_available("hermes")

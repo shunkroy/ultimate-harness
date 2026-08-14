@@ -5,10 +5,11 @@ from __future__ import annotations
 import time
 import random
 from dataclasses import replace
-from typing import Dict
+from typing import Dict, List
 
 from .adapters.base import EngineAdapter
 from .circuit import CircuitBreaker
+from .events import FAILURE_UNKNOWN, normalize_failure
 from .models import EngineResult, RoutingDecision, RunRequest
 from .policy import PolicyRouter, canonicalize_request
 from .store import Store
@@ -49,19 +50,26 @@ class Orchestrator:
         if request.dry_run:
             result = EngineResult(
                 decision.engine, True, text="dry-run: no engine invoked", exit_code=0,
-                metadata={"decision": decision.reason},
+                metadata={
+                    "decision": decision.reason,
+                    **self._route_metadata(request, decision, []),
+                },
             )
             return decision, result, ""
 
-        candidates = [decision.engine]
-        if not request.no_fallback and request.engine == "auto":
+        candidates = list(decision.candidates) if decision.candidates else [decision.engine]
+        if not request.no_fallback and request.engine == "auto" and decision.fallbacks:
             candidates.extend(x for x in decision.fallbacks if x not in candidates)
+        if request.no_fallback:
+            candidates = candidates[:1]
 
         last = EngineResult(decision.engine, False, error="no engine attempted", error_code="unavailable", exit_code=1)
         chosen = decision
+        tried: List[Dict[str, str]] = []
         for engine_name in candidates:
             engine = self.engines.get(engine_name)
             if engine is None:
+                self.store.append_audit("route.skipped", engine_name, {"reason": "no adapter registered"})
                 continue
             current = decision if engine_name == decision.engine else replace(
                 decision, engine=engine_name,
@@ -73,6 +81,10 @@ class Orchestrator:
             view = self.breakers.before(key)
             if not view.allowed:
                 last = EngineResult(engine_name, False, error="circuit is open", error_code="circuit_open", exit_code=1)
+                self.store.append_audit(
+                    "route.skipped", engine_name,
+                    {"reason": f"circuit open (state={view.state}, failures={view.failures})"},
+                )
                 continue
             routed = replace(request, engine=engine_name, agent=current.agent, model=current.model)
             result = engine.run(routed)
@@ -86,12 +98,60 @@ class Orchestrator:
                 time.sleep(min(2.0, (0.25 * (2 ** (attempt - 1))) + random.uniform(0, 0.15)))
                 result = engine.run(routed)
             result.metadata["attempts"] = attempt + 1
+            normalized = normalize_failure(result.error_code, result.error) if not result.success else ""
+            result.metadata["normalized_failure"] = normalized
+            result.metadata["raw_error_code"] = result.error_code or ""
+            tried.append({
+                "engine": engine_name,
+                "provider": request.provider or "",
+                "model": current.model or "",
+                "status": "succeeded" if result.success else "failed",
+                "normalized_failure": normalized,
+                "error_code": result.error_code or "",
+                "attempts": str(attempt + 1),
+            })
             if result.success:
                 self.breakers.success(key)
                 chosen, last = current, result
                 break
             self.breakers.failure(key, result.error or result.error_code or "engine failure")
+            self.store.append_audit(
+                "route.failed", engine_name,
+                {
+                    "provider": request.provider or "", "model": current.model or "",
+                    "error_code": result.error_code or "", "normalized_failure": normalized,
+                    "attempts": attempt + 1,
+                },
+            )
             chosen, last = current, result
 
+        last.metadata.update(self._route_metadata(request, chosen, tried))
+
         run_id = self.store.record_run(request, chosen, last, started)
+        if run_id:
+            self.store.append_audit(
+                "route.completed", run_id,
+                self._route_metadata(request, chosen, tried),
+            )
         return chosen, last, run_id
+
+    @staticmethod
+    def _route_metadata(
+        request: RunRequest, decision: RoutingDecision, tried: List[Dict[str, str]],
+    ) -> Dict[str, object]:
+        """Routing observability: candidates, skips, attempts and final route."""
+        candidates = list(decision.candidates) if decision.candidates else [decision.engine]
+        last_tried = tried[-1] if tried else {}
+        return {
+            "candidate_routes": candidates,
+            "skipped_routes": [{"engine": name, "reason": reason} for name, reason in decision.skipped],
+            "tried_routes": tried,
+            "fell_back": bool(tried) and tried[0]["engine"] != decision.engine,
+            "final_route": {
+                "engine": decision.engine,
+                "provider": request.provider or "",
+                "model": decision.model or "",
+                "normalized_failure": last_tried.get("normalized_failure", FAILURE_UNKNOWN),
+                "fallback_reason": decision.reason,
+            },
+        }

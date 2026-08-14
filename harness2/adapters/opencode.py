@@ -19,6 +19,20 @@ from ..execution import (
 )
 from ..models import CapabilityStatus, EngineResult, EngineStatus, RunRequest
 from ..security import PrivateTempFile, ensure_private_dir
+from .manifest import COST_MIXED, RuntimeManifest
+
+#: Zen free-model catalog discovered from the installed runtime
+#: (``opencode models``, 2026-08-14). Kept as manifest *data*, not router
+#: logic; the runtime remains the authoritative discovery source.
+ZEN_FREE_MODELS: tuple[str, ...] = (
+    "opencode/big-pickle",
+    "opencode/deepseek-v4-flash-free",
+    "opencode/hy3-free",
+    "opencode/laguna-s-2.1-free",
+    "opencode/mimo-v2.5-free",
+    "opencode/nemotron-3-ultra-free",
+    "opencode/nemotron-3.5-lightning-free",
+)
 
 
 class OpenCodeAdapter(EngineAdapter):
@@ -26,6 +40,19 @@ class OpenCodeAdapter(EngineAdapter):
 
     def __init__(self, config: HarnessConfig):
         self.config = config
+
+    def manifest(self) -> RuntimeManifest:
+        return RuntimeManifest(
+            id=self.name,
+            capabilities=("reason.general", "coding", "research", "expert-routing", "tools"),
+            auth_mechanisms=("api-key", "oauth", "env", "user-authorized"),
+            auth_configured=True,
+            cost_class=COST_MIXED,
+            privacy_class="external",
+            models=(),
+            health_probe="status()",
+            execution_contract="opencode run --format json (private-file prompt)",
+        )
 
     def status(self) -> EngineStatus:
         available = self.config.executable_available("opencode")
@@ -116,6 +143,21 @@ class OpenCodeAdapter(EngineAdapter):
 class ZenAdapter(OpenCodeAdapter):
     name = "zen"
     DEFAULT_MODEL = "opencode/claude-sonnet-5"
+
+    def manifest(self) -> RuntimeManifest:
+        key = bool(self.config.credential("OPENCODE_API_KEY"))
+        return RuntimeManifest(
+            id=self.name,
+            capabilities=("reason.general", "coding", "research", "curated-models"),
+            auth_mechanisms=("api-key",),
+            auth_configured=key,
+            cost_class="free",
+            privacy_class="external",
+            models=ZEN_FREE_MODELS,
+            health_probe="status()",
+            execution_contract="opencode run --format json via Zen provider",
+            evidence=("catalog discovered from installed runtime 2026-08-14",),
+        )
 
     def status(self) -> EngineStatus:
         base = super().status()

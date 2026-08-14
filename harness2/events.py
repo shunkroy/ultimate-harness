@@ -136,6 +136,91 @@ def _first_str(obj: Any, *keys: str) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Provider-fluid failure taxonomy
+# ---------------------------------------------------------------------------
+#
+# Engines/providers report failures in their own words. Harness normalizes
+# them into stable internal categories so routing, cooldowns and reports can
+# reason about *classes* of failure without knowing every vendor's error
+# format. The raw vendor error/code always remains attached as evidence.
+
+FAILURE_QUOTA_EXHAUSTED = "quota_exhausted"
+FAILURE_RATE_LIMITED = "rate_limited"
+FAILURE_AUTHENTICATION = "authentication_failed"
+FAILURE_AUTHORIZATION = "authorization_failed"
+FAILURE_MODEL_UNAVAILABLE = "model_unavailable"
+FAILURE_PROVIDER_UNAVAILABLE = "provider_unavailable"
+FAILURE_ENGINE_UNAVAILABLE = "engine_unavailable"
+FAILURE_TIMEOUT = "timeout"
+FAILURE_NETWORK = "network_failure"
+FAILURE_CONTEXT_TOO_LARGE = "context_too_large"
+FAILURE_INVALID_REQUEST = "invalid_request"
+FAILURE_POLICY_DENIED = "policy_denied"
+FAILURE_ENGINE = "engine_failure"
+FAILURE_UNKNOWN = "unknown_provider_failure"
+
+#: Ordered (category, needles) pairs; first match wins. Keep rate-limit
+#: patterns ahead of generic context patterns ("tokens per minute" is a
+#: rate signal, not a context-length signal).
+_FAILURE_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
+    (FAILURE_RATE_LIMITED, ("rate limit", "too many requests", "429", "tokens per minute", "requests per minute", "tpm", "rpm", "slow down")),
+    (FAILURE_QUOTA_EXHAUSTED, ("usage limit", "quota", "insufficient balance", "billing", "out of credits", "credit balance", "plan and billing")),
+    (FAILURE_AUTHENTICATION, ("invalid api key", "incorrect api key", "api key is not configured", "missing api key", "authentication failed", "invalid credentials", "401")),
+    (FAILURE_AUTHORIZATION, ("forbidden", "permission denied", "not authorized", "authorization failed", "403", "not permitted")),
+    (FAILURE_MODEL_UNAVAILABLE, ("model not found", "model does not exist", "unknown model", "model unavailable", "no such model", "model id")),
+    (FAILURE_CONTEXT_TOO_LARGE, ("context length", "context window", "too long", "maximum context", "reduce your message size", "token limit", "max tokens")),
+    (FAILURE_NETWORK, ("network", "connection", "dns", "socket", "tls", "certificate", "timed out connecting")),
+    (FAILURE_POLICY_DENIED, ("policy", "not allowed", "blocked", "refused by policy")),
+]
+
+#: Legacy engine-level codes mapped onto the taxonomy.
+_FAILURE_CODE_MAP: dict[str, str] = {
+    "timeout": FAILURE_TIMEOUT,
+    "unavailable": FAILURE_ENGINE_UNAVAILABLE,
+    "daemon_unavailable": FAILURE_PROVIDER_UNAVAILABLE,
+    "spawn_error": FAILURE_ENGINE,
+    "process_error": FAILURE_ENGINE,
+    "engine_failure": FAILURE_ENGINE,
+    "policy_denied": FAILURE_POLICY_DENIED,
+    "disabled": FAILURE_POLICY_DENIED,
+    "unsafe_endpoint": FAILURE_POLICY_DENIED,
+    "invalid_execution": FAILURE_INVALID_REQUEST,
+    "invalid_request": FAILURE_INVALID_REQUEST,
+    "invalid_model": FAILURE_MODEL_UNAVAILABLE,
+    "missing_credential": FAILURE_AUTHENTICATION,
+    "authentication_failed": FAILURE_AUTHENTICATION,
+    "context_too_large": FAILURE_CONTEXT_TOO_LARGE,
+    "local_error": FAILURE_PROVIDER_UNAVAILABLE,
+    "output_limit": FAILURE_CONTEXT_TOO_LARGE,
+    "event_limit": FAILURE_CONTEXT_TOO_LARGE,
+    "malformed_stream": FAILURE_ENGINE,
+    "truncated_stream": FAILURE_ENGINE,
+    "trailing_stream": FAILURE_ENGINE,
+}
+
+
+def normalize_failure(error_code: Optional[str], message: Optional[str]) -> str:
+    """Map an engine/provider failure into the stable failure taxonomy.
+
+    The raw ``error_code``/``message`` stay attached to the result as
+    evidence; this returns the normalized class only.
+    """
+    if error_code == "circuit_open":
+        return FAILURE_PROVIDER_UNAVAILABLE
+    if error_code in _FAILURE_CODE_MAP and not (message or "").strip():
+        return _FAILURE_CODE_MAP[error_code]
+    text = " ".join(part for part in (error_code or "", message or "") if part).lower()
+    if not text:
+        return FAILURE_UNKNOWN
+    for category, needles in _FAILURE_PATTERNS:
+        if any(needle in text for needle in needles):
+            return category
+    if error_code in _FAILURE_CODE_MAP:
+        return _FAILURE_CODE_MAP[error_code]
+    return FAILURE_UNKNOWN
+
+
 def _count_and_decode(lines: Iterable[str]) -> tuple[int, int, List[JsonObject]]:
     """Split an iterable of raw lines into (raw_count, malformed_count, events).
 
@@ -294,9 +379,16 @@ def parse_opencode(
             last_terminal = "error"
             _record_opencode_error(result, event.get("error"))
         elif etype == "step_finish":
-            result.saw_terminal = True
-            result.terminal_count += 1
-            last_terminal = "step_finish"
+            # A step_finish is terminal only when it ends the *session*.
+            # Multi-step sessions emit intermediate step_finish(record) with
+            # reason "tool-calls" before the final "stop"; treating the first
+            # finish as terminal would misclassify the real answer as trailing.
+            part = event.get("part")
+            reason = part.get("reason") if isinstance(part, dict) else None
+            if reason in (None, "stop", "error", "aborted", "max-turns"):
+                result.saw_terminal = True
+                result.terminal_count += 1
+                last_terminal = "step_finish"
         # step_start / message / session.* / etc. carry no assistant text.
     return _strict_result(result) if strict else result
 

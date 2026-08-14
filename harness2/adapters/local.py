@@ -15,6 +15,7 @@ from ..models import CapabilityStatus, EngineResult, EngineStatus, RunRequest
 from ..store import Store
 from ..platforms import is_loopback_url
 from ..execution import BodyDeadlineExceeded, BodyLimitExceeded, read_bounded_body
+from .manifest import COST_PRIVATE, PRIVACY_LOCAL, RuntimeManifest
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -32,6 +33,19 @@ class LocalAdapter(EngineAdapter):
     def __init__(self, config: HarnessConfig, store: Store):
         self.config = config
         self.store = store
+
+    def manifest(self) -> RuntimeManifest:
+        return RuntimeManifest(
+            id=self.name,
+            capabilities=("reason.private",),
+            auth_mechanisms=(),
+            auth_configured=self.enabled(),
+            cost_class=COST_PRIVATE,
+            privacy_class=PRIVACY_LOCAL,
+            models=(),
+            health_probe="GET /v1/models (loopback only)",
+            execution_contract="loopback HTTP /v1 (llama.cpp-compatible)",
+        )
 
     def enabled(self) -> bool:
         return self.store.setting("engine.local.enabled", "false") == "true"
