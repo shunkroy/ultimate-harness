@@ -8,7 +8,7 @@ import time
 
 from .base import EngineAdapter
 from ..config import HarnessConfig
-from ..events import parse_text
+from ..events import normalize_failure, parse_text
 from ..execution import (
     ProcessConfigurationError,
     ProcessRequest,
@@ -128,6 +128,13 @@ class OpenCodeAdapter(EngineAdapter):
         success = proc.returncode == 0 and parsed.success
         if not success and not error and not parsed.saw_terminal:
             error, code = "OpenCode event stream ended without a terminal event", "truncated_stream"
+        if not success:
+            # Provider-level rejections (quota, rate limit, auth, model
+            # unavailable …) must land in the harness taxonomy so circuits,
+            # retries and fallback decisions see the real failure class —
+            # e.g. DeepSeek free-tier "usage limit has been reached" surfaces
+            # as quota_exhausted instead of a raw "APIError".
+            code = normalize_failure(code, error)
         return EngineResult(
             self.name, success, parsed.text, error, code,
             0 if success else (proc.returncode or 1), time.monotonic() - started,

@@ -156,6 +156,20 @@ class PolicyRouter:
             if self._usable("prime"):
                 return RoutingDecision("prime", None, request.model, "OpenCode unavailable", (), "fallback")
 
+        # Q&A fast path: short general prompts go to the direct engine first
+        # (raw REST, no agent boot — sub-second on this phone), with the
+        # agent chain as fallbacks. Longer/complex prompts keep the control
+        # path so agent capabilities are not lost.
+        if self.statuses.get("direct") and self.statuses["direct"].healthy and len(text) <= 200:
+            route = assemble_candidates("direct", self.statuses)
+            if route.candidates:
+                return RoutingDecision(
+                    "direct", None, model,
+                    "Q&A fast path (short general prompt; direct REST)",
+                    tuple(c for c in route.candidates if c != "direct"),
+                    "fast", route.candidates, route.skipped,
+                )
+
         route = assemble_candidates("opencode", self.statuses)
         if not route.candidates:
             raise PolicyRefusal("no healthy external engine is available")

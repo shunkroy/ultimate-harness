@@ -11,7 +11,7 @@ import unittest.mock as mock
 import urllib.error
 
 from harness2.adapters.base import EngineAdapter
-from harness2.adapters.direct import DirectAdapter, KNOWN_MODELS
+from harness2.adapters.direct import DEFAULT_MODEL, DirectAdapter, KNOWN_MODELS
 from harness2.events import (
     FAILURE_AUTHENTICATION,
     FAILURE_RATE_LIMITED,
@@ -124,11 +124,39 @@ class DirectRunTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(normalize_failure(result.error_code, result.error), FAILURE_AUTHENTICATION)
 
-    def test_missing_model_is_invalid_request(self):
+    def test_missing_model_falls_back_to_builtin_default(self):
         adapter = _fake_adapter()
-        result = adapter.run(RunRequest("hello"))
-        self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "invalid_request")
+        with mock.patch("harness2.adapters.direct.urllib.request.urlopen",
+                        return_value=FakeResponse(_fake_openai_response("DEF-OK"))) as urlopen:
+            with mock.patch.dict(os.environ, {}, clear=False):
+                result = adapter.run(RunRequest("hello"))
+        self.assertTrue(result.success, result.error)
+        self.assertEqual(result.text, "DEF-OK")
+        self.assertEqual(result.metadata["resolved_model"], DEFAULT_MODEL)
+        url = urlopen.call_args.args[0].full_url
+        self.assertIn("groq.com", url)
+
+    def test_env_default_model_wins_over_builtin(self):
+        adapter = _fake_adapter(("GEMINI_API_KEY",))
+        with mock.patch("harness2.adapters.direct.urllib.request.urlopen",
+                        return_value=FakeResponse(_fake_google_response("GM-OK"))):
+            with mock.patch.dict(os.environ,
+                                 {"HARNESS_DEFAULT_MODEL": "google/gemini-3.5-flash-lite"},
+                                 clear=False):
+                result = adapter.run(RunRequest("hello"))
+        self.assertTrue(result.success, result.error)
+        self.assertEqual(result.metadata["resolved_model"], "google/gemini-3.5-flash-lite")
+
+    def test_explicit_model_beats_env_default(self):
+        adapter = _fake_adapter()
+        with mock.patch("harness2.adapters.direct.urllib.request.urlopen",
+                        return_value=FakeResponse(_fake_openai_response("EXP-OK"))):
+            with mock.patch.dict(os.environ,
+                                 {"HARNESS_DEFAULT_MODEL": "google/gemini-3.5-flash-lite"},
+                                 clear=False):
+                result = adapter.run(RunRequest("hello", model="groq/llama-3.3-70b-versatile"))
+        self.assertTrue(result.success, result.error)
+        self.assertEqual(result.metadata["resolved_model"], "groq/llama-3.3-70b-versatile")
 
     def test_unknown_prefix(self):
         adapter = _fake_adapter()

@@ -64,6 +64,22 @@ KNOWN_MODELS: Dict[str, str] = {
 }
 
 
+#: Fallback model when a run carries no model and ``HARNESS_DEFAULT_MODEL``
+#: is unset. Groq is the fastest verified free route (0.4s); set
+#: HARNESS_DEFAULT_MODEL=google/gemini-3.5-flash-lite for prompts
+#: that can exceed Groq's 12k TPM.
+DEFAULT_MODEL = "groq/llama-3.3-70b-versatile"
+
+
+def resolve_model(request: RunRequest) -> Optional[str]:
+    """Preferred model for a direct run: explicit > env > built-in default.
+
+    ``request.model`` stays untouched (the decision model is None for auto
+    rescue); the resolved value is recorded in result metadata.
+    """
+    return request.model or os.environ.get("HARNESS_DEFAULT_MODEL") or DEFAULT_MODEL
+
+
 class DirectAdapter(EngineAdapter):
     """Raw REST single-shot engine (no agent loop, sub-second)."""
 
@@ -112,12 +128,13 @@ class DirectAdapter(EngineAdapter):
         error_result = lambda **kw: EngineResult(  # noqa: E731
             self.name, False, duration=time.monotonic() - started, exit_code=1, **kw
         )
-        if not request.model:
+        model = resolve_model(request)
+        if model is None:
             return error_result(
                 error="direct engine requires --model (e.g. groq/llama-3.3-70b-versatile)",
                 error_code="invalid_request",
             )
-        prefix, _, model_name = request.model.partition("/")
+        prefix, _, model_name = model.partition("/")
         if prefix not in _PROVIDERS:
             return error_result(
                 error=f"unknown direct provider prefix {prefix!r} (use groq/, google/, deepseek/)",
@@ -157,6 +174,7 @@ class DirectAdapter(EngineAdapter):
         return EngineResult(
             self.name, True, text=text, exit_code=0,
             duration=time.monotonic() - started,
+            metadata={"resolved_model": model},
         )
 
     # -- HTTP --------------------------------------------------------------

@@ -196,6 +196,50 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(ranked[0], "zen")  # free + capability fit beats mixed
 
 
+class PolicyFastPathTests(unittest.TestCase):
+    """Q&A fast path: short general prompts route to the direct engine
+    first (raw REST, sub-second); long/complex prompts keep the opencode
+    control plane."""
+
+    def _pool_with_direct(self, *, healthy=True):
+        pool = statuses()
+        pool["direct"] = EngineStatus(
+            "direct", healthy, healthy, healthy,
+            CapabilityStatus.ACTIVE if healthy else CapabilityStatus.IMPLEMENTED,
+            "" if healthy else "no direct provider key configured",
+            ("reason.general",), "external", "free",
+        )
+        return pool
+
+    def test_short_general_prompt_fast_paths_to_direct(self):
+        decision = PolicyRouter(self._pool_with_direct()).decide(RunRequest("hello"))
+        self.assertEqual(decision.engine, "direct")
+        self.assertEqual(decision.task_class, "fast")
+        self.assertEqual(decision.candidates[0], "direct")
+        self.assertIn("opencode", decision.fallbacks)
+        self.assertIn("opencode", decision.candidates)
+
+    def test_long_prompt_keeps_control_plane(self):
+        decision = PolicyRouter(self._pool_with_direct()).decide(RunRequest("word " * 60))
+        self.assertEqual(decision.engine, "opencode")
+        self.assertEqual(decision.task_class, "control")
+        self.assertEqual(decision.candidates[0], "opencode")
+        # direct remains a later fallback in the agent chain.
+        self.assertIn("direct", decision.candidates[1:])
+
+    def test_fast_path_disabled_when_direct_unhealthy(self):
+        decision = PolicyRouter(self._pool_with_direct(healthy=False)).decide(RunRequest("hello"))
+        self.assertEqual(decision.engine, "opencode")
+        self.assertEqual(decision.task_class, "control")
+
+    def test_fast_path_respects_explicit_engine(self):
+        decision = PolicyRouter(self._pool_with_direct()).decide(
+            RunRequest("hello", engine="prime"),
+        )
+        self.assertEqual(decision.engine, "prime")
+        self.assertEqual(decision.candidates, ("prime",))
+
+
 class OrchestratorFallbackTests(unittest.TestCase):
     def make(self, engines, *, threshold=3, cooldown=30.0):
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)

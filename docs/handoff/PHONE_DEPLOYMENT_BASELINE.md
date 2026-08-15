@@ -92,10 +92,33 @@ harness svc status | svc up | svc down
 harness run --engine direct "question"                             # auto model (HARNESS_DEFAULT_MODEL)
 HARNESS_DEFAULT_MODEL=groq/llama-3.3-70b-versatile harness run --engine direct "question"
 HARNESS_DEFAULT_MODEL=google/gemini-3.5-flash-lite harness run --engine direct "question"
+
+# plain `harness run --engine auto "short question"` also works now:
+#   short general prompts (<=200 chars) hit the Q&A fast path -> direct engine
+#   long/complex prompts keep the opencode control plane (direct still a fallback)
 ```
 
-## 6. Provider-routing state (sealed in 5a299b5)
+## 6. Provider-routing state (sealed in 5a299b5 + 315d099)
 
+- `AUTO` → **Q&A fast path (NEW): short general prompts (≤200 chars) route
+  to the `direct` engine first** (raw REST, sub-second), with the agent
+  chain as fallbacks. Long/complex prompts keep the opencode control plane;
+  `direct` is fallback #4 there too.
+- **Direct engine model resolution (NEW):** explicit `--model` >
+  `HARNESS_DEFAULT_MODEL` env > built-in `groq/llama-3.3-70b-versatile`.
+  Phone default env: `HARNESS_DEFAULT_MODEL=google/gemini-3.5-flash-lite`
+  (exported in PRoot `/root/.bashrc`; no TPM cap, verified 1.4s).
+- **CRITICAL wrapper fix (2026-08-15):** `proot-distro login` sanitizes the
+  environment, so `harness-phone` previously ran WITHOUT provider keys →
+  `direct` was skipped in auto → opencode agent path only (97.1s then
+  DeepSeek free-tier "usage limit reached"). `~/bin/harness-phone` now
+  extracts `*_API_KEY` + `HARNESS_DEFAULT_MODEL` exports from
+  `/root/.bashrc` before exec. If a native-Termux run still fails, check
+  the wrapper's eval lines first.
+- Failure normalization at the adapter level (NEW): opencode errors now
+  pass through `normalize_failure` (e.g. DeepSeek "usage limit" →
+  `quota_exhausted` instead of raw `APIError`) so circuits/retries/fallbacks
+  see the true failure class.
 - `AUTO` → `opencode` primary, fallbacks `[prime]`; `zen`/`hermes`/`local`
   skipped with recorded reasons (disabled/unconfigured).
 - Env controls: `HARNESS_DEFAULT_MODEL` (default model), `HARNESS_FALLBACK_ORDER`
@@ -127,12 +150,15 @@ HARNESS_DEFAULT_MODEL=google/gemini-3.5-flash-lite harness run --engine direct "
 
 ## 7. Known non-blocking issues (re-evaluated 2026-08-14)
 
-0. **Latency “lightyear” — RESOLVED (this commit):** opencode-agent path
-   (zen free) can still take 30–75 s+ intermittently (queue + agent boot +
-   timeouts). The new **direct engine** (`harness run --engine direct`) does
-   plain HTTPS provider calls → Groq 0.4 s / Google 1.4 s. If a prompt ever
-   shows `[Xs run=…]` with X ≫ 10 on a direct route, check circuits +
-   `/root/.harness2/harness.db` `runs` table (duration recorded).
+0. **Latency “lightyear” — RESOLVED (315d099 + this commit):** opencode-agent
+   path (zen free) can still take 30–75 s+ intermittently (queue + agent boot +
+   timeouts), and on 2026-08-15 auto ran WITHOUT keys via native-Termux
+   (wrapper sanitized env — now fixed) hitting DeepSeek free-tier quota
+   (97.1 s, "usage limit reached"). Now:
+   - short prompts: Q&A fast path → direct engine → **0.4 s** (verified live
+     with `harness run --engine auto "Hello"`);
+   - long prompts: opencode control, direct fallback #4;
+   - keys + default model extracted by the wrapper from `/root/.bashrc`;
 1. `prime.source` dirty files=1 (`packages/ai/src/models.generated.ts`) —
    pre-existing, separate task; do not touch.
 2. `zen` engine unconfigured (needs `OPENCODE_API_KEY`); free zen models
