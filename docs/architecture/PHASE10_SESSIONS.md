@@ -132,9 +132,28 @@ never a guess.
   marker-like text, newlines or quotes inside user content cannot escape the
   value or forge sections. Real headers appear exactly once at line starts.
 - **Provider neutrality**: the framing is identical for every engine,
-  provider and model; only the request value differs. Routing decisions are
-  likewise envelope-independent: the Q&A fast path measures the decoded user
-  task length, never the envelope (`harness2.policy._user_task_length`).
+  provider and model; only the request value differs.
+- **Policy isolation (architectural rule)**:
+
+  ```
+  PROVIDER PROMPT = semantics + history + current request
+  POLICY TASK    = current request only
+  ```
+
+  All task-semantic policy decisions (messaging/parallel/durable keyword
+  classification, `expert_for_task`, the short-Q&A length test, future task
+  classifiers) consume `harness2.policy.policy_task_text(request)`, which is
+  the whole prompt for non-session requests and only the JSON value under
+  the genuine `[harness:current-request]` section for session requests.
+  Framing and history never mutate the current task's capability
+  classification: "persistent" in the semantics block cannot route to Prime,
+  and a "telegram" mention in old history cannot route to Hermes. Session
+  history may inform the reasoning model, but it is context/evidence, not
+  task authority. Malformed Harness-owned envelopes fail closed
+  (`PolicyRefusal`); a literal marker in an ordinary non-session prompt is
+  inert user text. The full provider-facing `request.prompt` still passes
+  unchanged to the selected runtime — only policy classification uses the
+  extracted task.
 
 ## Turn lifecycle and crash recovery
 
@@ -191,7 +210,13 @@ provenance). Plain `run` is unchanged.
 11. Session semantics: fixed semantics block always first; section order
     semantics < history < current; current request JSON-encoded (spoof
     text cannot escape the value); injected history claims are data, not
-    authority; framing identical across providers; envelope length never
-    changes task-based routing (fast path uses decoded task length).
+    authority; framing identical across providers.
+12. Policy isolation: `policy_task_text` returns the whole prompt for
+    non-session requests and only the decoded current request for session
+    requests; all keyword/length/expert classification uses it (semantics
+    "persistent" never routes to Prime, history "telegram" never routes to
+    Hermes, current-task keywords still do); malformed session envelopes
+    fail closed with `PolicyRefusal`; literal markers in plain prompts are
+    inert text.
 
 Full suite (credential-free): green.

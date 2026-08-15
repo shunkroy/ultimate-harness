@@ -511,6 +511,22 @@ def _final_model(result: EngineResult, decision: RoutingDecision) -> Optional[st
     return decision.model or None
 
 
+def assemble_session_prompt(context_text: str, prompt: str) -> str:
+    """Provider-facing prompt for a session turn: fixed semantics block,
+    JSON-lines history payload, and JSON-encoded current request.
+
+    The current request is the last section and its value is JSON-encoded,
+    so the genuine ``[harness:current-request]`` header is the last line
+    exactly equal to the header (no JSON value can equal it). Policy
+    extracts the task from this section only.
+    """
+    sections = [_SEMANTICS_TEXT]
+    if context_text:
+        sections.append(f"{HISTORY_HEADER}\n{context_text}")
+    sections.append(f"{CURRENT_REQUEST_HEADER}\n{json.dumps(prompt, ensure_ascii=False)}")
+    return "\n\n".join(sections)
+
+
 def run_session_turn(
     service: SessionService, foreground, session_id: str, prompt: str,
     *, sensitive: bool = False, untrusted: bool = False,
@@ -536,11 +552,7 @@ def run_session_turn(
         )
         service.mark_processing(session_id, user_turn.seq)
 
-    sections = [_SEMANTICS_TEXT]
-    if context.text:
-        sections.append(f"{HISTORY_HEADER}\n{context.text}")
-    sections.append(f"{CURRENT_REQUEST_HEADER}\n{json.dumps(prompt, ensure_ascii=False)}")
-    routed_prompt = "\n\n".join(sections)
+    routed_prompt = assemble_session_prompt(context.text, prompt)
 
     request = RunRequest(
         prompt=routed_prompt, engine=engine, agent=agent, model=model, provider=provider,

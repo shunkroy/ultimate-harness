@@ -21,24 +21,53 @@ _PARALLEL = ("parallel agents", "fan out", "fan-out", "delegate in parallel", "m
 _CURRENT_REQUEST_HEADER = "[harness:current-request]"
 
 
-def _user_task_length(prompt: str) -> int:
-    """Length of the user task, excluding Harness-owned session framing.
+def policy_task_text(request: RunRequest) -> str:
+    """The actual current user task, isolated from Harness-owned framing.
 
-    Session runs envelope the user request as a JSON value under
-    ``[harness:current-request]``; the surrounding semantics/history sections
-    are fixed or variable Harness boilerplate and must never influence
-    task-based routing (e.g. the Q&A fast path). Without framing, the whole
-    prompt is the task, preserving legacy behavior.
+    PROVIDER PROMPT = semantics + history + current request
+    POLICY TASK    = current request only
+
+    - Non-session requests (``harness_session_id is None``): the whole
+      prompt IS the task, byte for byte. A literal ``[harness:current-request]``
+      inside an ordinary prompt is ordinary user text and never triggers
+      envelope decoding (no magic-marker detection).
+    - Harness session requests: only the JSON value under the genuine
+      ``[harness:current-request]`` section is the task. The genuine header
+      is the last line exactly equal to the marker; JSON-encoded values can
+      never equal it, so history/current-request content cannot forge one.
+    - Malformed Harness-owned envelope: fail closed with ``PolicyRefusal``.
+      History or framing text is never silently treated as the task.
     """
-    if _CURRENT_REQUEST_HEADER in prompt:
-        remainder = prompt.split(_CURRENT_REQUEST_HEADER, 1)[1].strip()
-        try:
-            value = json.loads(remainder)
-        except ValueError:
-            value = remainder
-        if isinstance(value, str):
-            return len(value)
-    return len(prompt)
+    if request.harness_session_id is None:
+        return request.prompt
+    lines = request.prompt.splitlines()
+    header_index = None
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index] == _CURRENT_REQUEST_HEADER:
+            header_index = index
+            break
+    if header_index is None:
+        raise PolicyRefusal(
+            "malformed Harness session envelope: missing "
+            "[harness:current-request] section; refusing to classify from framing"
+        )
+    remainder = "\n".join(lines[header_index + 1:]).strip()
+    if not remainder:
+        raise PolicyRefusal(
+            "malformed Harness session envelope: empty current-request section"
+        )
+    try:
+        value = json.loads(remainder)
+    except ValueError as exc:
+        raise PolicyRefusal(
+            f"malformed Harness session envelope: current request is not a "
+            f"JSON value ({exc}); refusing to classify from framing"
+        ) from exc
+    if not isinstance(value, str):
+        raise PolicyRefusal(
+            "malformed Harness session envelope: current request is not a string value"
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -123,7 +152,8 @@ class PolicyRouter:
                 )
 
         explicit = request.engine != "auto"
-        text = request.prompt.lower()
+        task_text = policy_task_text(request)
+        text = task_text.lower()
         if request.sensitive:
             if not self._usable("local") or not self.statuses["local"].healthy:
                 raise PolicyRefusal("sensitive tasks require an enabled, healthy loopback local engine")
@@ -137,7 +167,7 @@ class PolicyRouter:
                 "untrusted policy: plugins off, read-only sandbox agent", (), "untrusted",
             )
 
-        agent, routed_model, expert_reason = expert_for_task(request.prompt)
+        agent, routed_model, expert_reason = expert_for_task(task_text)
         model = request.model or routed_model
 
         if explicit:
@@ -185,7 +215,7 @@ class PolicyRouter:
         # (raw REST, no agent boot — sub-second on this phone), with the
         # agent chain as fallbacks. Longer/complex prompts keep the control
         # path so agent capabilities are not lost.
-        if self.statuses.get("direct") and self.statuses["direct"].healthy and _user_task_length(request.prompt) <= 200:
+        if self.statuses.get("direct") and self.statuses["direct"].healthy and len(task_text) <= 200:
             route = assemble_candidates("direct", self.statuses)
             if route.candidates:
                 return RoutingDecision(
