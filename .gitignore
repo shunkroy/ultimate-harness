@@ -14,3 +14,11 @@ tmp/
 .env
 .venv/
 venv/
+
+# Phase 10.2: private source material (e.g., local Overlord volumes) and
+# derived extractions must never enter the repository. Sources live under the
+# Harness state root (outside the repo); this guard covers accidental staging.
+private-sources/
+*.pdf
+*.epub
+*.mobi
