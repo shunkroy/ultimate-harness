@@ -2,6 +2,14 @@
 
 The orchestration core is shell-neutral. Platform-specific behavior is
 concentrated here for Windows, macOS, Linux, native Termux and Ubuntu PRoot.
+
+State-root resolution is deterministic and never existence-based: a directory
+counts as Harness state only when it contains a readable Harness kernel
+database (``is_harness_state_root``). An accidentally created empty legacy
+``~/.harness2`` therefore cannot hijack the canonical platform state root, and
+when both the legacy and the canonical root contain real state the resolution
+refuses to choose silently (``HarnessSplitStateError``). Explicit
+``HARNESS2_HOME`` always wins.
 """
 
 from __future__ import annotations
@@ -10,6 +18,7 @@ import ipaddress
 import os
 import platform as _platform
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -188,6 +197,73 @@ def executable_name(name: str, info: PlatformInfo) -> str:
     return name + (".exe" if info.is_windows else "")
 
 
+class HarnessSplitStateError(RuntimeError):
+    """Both the canonical platform state root and the legacy ``~/.harness2``
+    root contain valid Harness state; resolution refuses to choose silently."""
+
+
+#: Database file names that may carry the Harness kernel schema marker.
+_HARNESS_DB_NAMES = ("harness.db", "harness.sqlite")
+
+
+def is_harness_state_root(path) -> bool:
+    """True only when ``path`` contains a readable Harness kernel database.
+
+    Deterministic validity check based on Harness-owned markers, never on
+    directory existence: an empty directory or a directory holding unrelated
+    files does not count as an installation. The marker is the kernel schema
+    table (``kernel_schema_migrations``) at version >= 1 inside a SQLite
+    database named like a Harness store.
+    """
+    try:
+        root = Path(path)
+        if not root.is_dir():
+            return False
+        for name in _HARNESS_DB_NAMES:
+            database = root / name
+            if not database.is_file():
+                continue
+            try:
+                con = sqlite3.connect(
+                    f"file:{database}?mode=ro", uri=True, timeout=1, isolation_level=None,
+                )
+                try:
+                    marker = con.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='kernel_schema_migrations'"
+                    ).fetchone()
+                    if marker is None:
+                        continue
+                    version = con.execute(
+                        "SELECT MAX(version) FROM kernel_schema_migrations"
+                    ).fetchone()
+                    if version and version[0] is not None and int(version[0]) >= 1:
+                        return True
+                finally:
+                    con.close()
+            except sqlite3.Error:
+                continue
+        return False
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _canonical_state_dir(
+    kind: PlatformKind, home_path: Path, values: Mapping[str, str],
+) -> Path:
+    """The canonical (non-legacy) state root for a platform kind."""
+    if kind == PlatformKind.WINDOWS:
+        local = values.get("LOCALAPPDATA", str(home_path / "AppData" / "Local"))
+        return Path(local) / "Harness2"
+    if kind == PlatformKind.MACOS:
+        return home_path / "Library" / "Application Support" / "Harness2"
+    if kind in {PlatformKind.TERMUX, PlatformKind.PROOT}:
+        # Android roots are home-relative by design (``~/.harness2``); the
+        # legacy location IS the canonical location there.
+        return home_path / ".harness2"
+    return Path(values.get("XDG_STATE_HOME", str(home_path / ".local" / "state"))) / "harness2"
+
+
 def _usable_executable(path: str, info: PlatformInfo) -> bool:
     return _canonical_executable(path, info) is not None
 
@@ -206,14 +282,6 @@ def _canonical_executable(path: str, info: PlatformInfo) -> Optional[str]:
         # launcher exists, accepting .ps1 here would make discovery lie.
         return resolved if Path(resolved).suffix.lower() in {".exe", ".cmd", ".bat", ".com", ""} else None
     return resolved if os.access(resolved, os.X_OK) else None
-
-
-def _safe_exists(path: Path) -> bool:
-    """Treat an inaccessible optional legacy path as absent, not fatal."""
-    try:
-        return path.exists()
-    except (FileNotFoundError, NotADirectoryError, PermissionError):
-        return False
 
 
 def detect_platform(
@@ -258,16 +326,23 @@ def detect_platform(
     state_override = raw_values.get("HARNESS2_HOME")
     if state_override:
         state = Path(state_override).expanduser()
-    elif _safe_exists(legacy):
-        state = legacy
-    elif kind == PlatformKind.WINDOWS:
-        state = Path(raw_values.get("LOCALAPPDATA", str(home_path / "AppData" / "Local"))) / "Harness2"
-    elif kind == PlatformKind.MACOS:
-        state = home_path / "Library" / "Application Support" / "Harness2"
-    elif kind in {PlatformKind.TERMUX, PlatformKind.PROOT}:
-        state = legacy
     else:
-        state = Path(raw_values.get("XDG_STATE_HOME", str(home_path / ".local" / "state"))) / "harness2"
+        canonical = _canonical_state_dir(kind, home_path, raw_values)
+        if canonical == legacy:
+            # Android platforms (Termux/PRoot) use ~/.harness2 as their
+            # canonical root; no conflict can exist between the two names.
+            state = canonical
+        else:
+            legacy_valid = is_harness_state_root(legacy)
+            canonical_valid = is_harness_state_root(canonical)
+            if legacy_valid and canonical_valid:
+                raise HarnessSplitStateError(
+                    f"split Harness state: both {legacy} (legacy) and {canonical} "
+                    f"(canonical) contain valid Harness state. Refusing to choose "
+                    "silently. Set HARNESS2_HOME to the intended root or move one "
+                    "tree aside, then retry."
+                )
+            state = legacy if legacy_valid else canonical
 
     if kind == PlatformKind.WINDOWS:
         config = Path(raw_values.get("APPDATA", str(home_path / "AppData" / "Roaming"))) / "Harness2"

@@ -58,11 +58,11 @@ class DetectionTests(unittest.TestCase):
         p = detect_platform(sys_platform="linux", os_name="posix", env={"HOME": "/h", "HARNESS2_HOME": "/custom"}, home="/h", release="6")
         self.assertEqual(str(p.state_dir), "/custom")
 
-    def test_existing_legacy_preferred(self):
+    def test_empty_legacy_directory_is_not_state(self):
         with tempfile.TemporaryDirectory() as home:
             os.mkdir(os.path.join(home, ".harness2"))
             p = detect_platform(sys_platform="linux", os_name="posix", env={"HOME": home}, home=home, release="6")
-            self.assertEqual(str(p.state_dir), os.path.join(home, ".harness2"))
+            self.assertEqual(str(p.state_dir), os.path.join(home, ".local", "state", "harness2"))
 
     def test_platform_info_does_not_retain_secrets(self):
         p = detect_platform(
@@ -85,6 +85,153 @@ class DetectionTests(unittest.TestCase):
             config = HarnessConfig(platform=p, state_root=os.path.join(home, "state"))
             with patch.dict(os.environ, {"OPENAI_API_KEY": "ambient-value"}):
                 self.assertEqual(config.credential("OPENAI_API_KEY"), "captured-value")
+
+
+class StateRootResolutionTests(unittest.TestCase):
+    """Phase 10.1: deterministic state-root resolution (A-I cases).
+
+    A valid Harness state root contains a readable kernel database carrying
+    the kernel schema-migrations marker; directory existence alone never
+    counts. Conflict between two valid roots is an explicit error, never a
+    silent preference.
+    """
+
+    @staticmethod
+    def valid_root(path):
+        import sqlite3
+        os.makedirs(path, exist_ok=True)
+        con = sqlite3.connect(os.path.join(path, "harness.db"))
+        con.execute(
+            "CREATE TABLE kernel_schema_migrations (version INTEGER PRIMARY KEY, "
+            "name TEXT NOT NULL UNIQUE, checksum TEXT NOT NULL, applied_at REAL NOT NULL)"
+        )
+        con.execute(
+            "INSERT INTO kernel_schema_migrations VALUES (5, 'harness_sessions', 'x', 1.0)"
+        )
+        con.commit()
+        con.close()
+
+    def _linux(self, home, **env):
+        values = {"HOME": home}
+        values.update(env)
+        return detect_platform(
+            sys_platform="linux", os_name="posix", env=values, home=home, release="6.8",
+        )
+
+    def test_a_canonical_valid_legacy_absent(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = os.path.join(home, ".local", "state", "harness2")
+            self.valid_root(root)
+            self.assertEqual(str(self._linux(home).state_dir), root)
+
+    def test_b_canonical_valid_legacy_empty_dir(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = os.path.join(home, ".local", "state", "harness2")
+            self.valid_root(root)
+            os.mkdir(os.path.join(home, ".harness2"))
+            self.assertEqual(str(self._linux(home).state_dir), root)
+
+    def test_c_legacy_valid_canonical_absent(self):
+        with tempfile.TemporaryDirectory() as home:
+            legacy = os.path.join(home, ".harness2")
+            self.valid_root(legacy)
+            self.assertEqual(str(self._linux(home).state_dir), legacy)
+
+    def test_d_both_valid_raises_split_state(self):
+        from harness2.platforms import HarnessSplitStateError
+        with tempfile.TemporaryDirectory() as home:
+            self.valid_root(os.path.join(home, ".harness2"))
+            self.valid_root(os.path.join(home, ".local", "state", "harness2"))
+            with self.assertRaises(HarnessSplitStateError) as ctx:
+                self._linux(home)
+            message = str(ctx.exception)
+            self.assertIn(".harness2", message)
+            self.assertIn(".local/state/harness2", message)
+            self.assertIn("HARNESS2_HOME", message)
+
+    def test_e_override_wins_even_when_both_valid(self):
+        from harness2.platforms import HarnessSplitStateError
+        with tempfile.TemporaryDirectory() as home:
+            self.valid_root(os.path.join(home, ".harness2"))
+            self.valid_root(os.path.join(home, ".local", "state", "harness2"))
+            p = self._linux(home, HARNESS2_HOME=os.path.join(home, "chosen"))
+            self.assertEqual(str(p.state_dir), os.path.join(home, "chosen"))
+
+    def test_f_fresh_linux_home_uses_xdg_canonical(self):
+        with tempfile.TemporaryDirectory() as home:
+            p = self._linux(home)
+            self.assertEqual(str(p.state_dir), os.path.join(home, ".local", "state", "harness2"))
+
+    def test_g_termux_legacy_is_canonical_no_conflict(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as home:
+            legacy = os.path.join(home, ".harness2")
+            self.valid_root(legacy)
+            p = detect_platform(
+                sys_platform="linux", os_name="posix",
+                env={"HOME": home, "PREFIX": "/data/data/com.termux/files/usr"},
+                home=home, release="6",
+            )
+            self.assertEqual(str(p.state_dir), legacy)
+            # An empty ~/.harness2 on Termux still resolves (Android canonical).
+            shutil.rmtree(legacy)
+            os.mkdir(legacy)
+            p = detect_platform(
+                sys_platform="linux", os_name="posix",
+                env={"HOME": home, "PREFIX": "/data/data/com.termux/files/usr"},
+                home=home, release="6",
+            )
+            self.assertEqual(str(p.state_dir), legacy)
+
+    def test_h_windows_canonical_local_and_legacy_only_compat(self):
+        with tempfile.TemporaryDirectory() as home:
+            local = os.path.join(home, "AppData", "Local")
+            os.makedirs(os.path.join(local, "Harness2"))
+            self.valid_root(os.path.join(local, "Harness2"))
+            p = detect_platform(
+                sys_platform="win32", os_name="nt",
+                env={"USERPROFILE": home, "LOCALAPPDATA": local, "APPDATA": home},
+                home=home, release="10",
+            )
+            self.assertEqual(str(p.state_dir), os.path.join(local, "Harness2"))
+            # Legacy-only Windows install keeps working (compat).
+            legacy = os.path.join(home, ".harness2")
+            self.valid_root(legacy)
+            os.rename(os.path.join(local, "Harness2"), os.path.join(local, "Harness2.old"))
+            p = detect_platform(
+                sys_platform="win32", os_name="nt",
+                env={"USERPROFILE": home, "LOCALAPPDATA": local, "APPDATA": home},
+                home=home, release="10",
+            )
+            self.assertEqual(str(p.state_dir), legacy)
+
+    def test_i_macos_canonical_application_support(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = os.path.join(home, "Library", "Application Support", "Harness2")
+            self.valid_root(root)
+            p = detect_platform(
+                sys_platform="darwin", os_name="posix", env={"HOME": home}, home=home, release="24",
+            )
+            self.assertEqual(str(p.state_dir), root)
+
+    def test_unrelated_files_do_not_mark_state(self):
+        with tempfile.TemporaryDirectory() as home:
+            legacy = os.path.join(home, ".harness2")
+            os.makedirs(legacy)
+            with open(os.path.join(legacy, "random.log"), "w", encoding="utf-8") as stream:
+                stream.write("not harness state")
+            self.assertEqual(str(self._linux(home).state_dir),
+                             os.path.join(home, ".local", "state", "harness2"))
+
+    def test_conflict_reported_by_cli_main_with_exit_2(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.valid_root(os.path.join(home, ".harness2"))
+            self.valid_root(os.path.join(home, ".local", "state", "harness2"))
+            with patch.dict(os.environ, {"HOME": home}, clear=True):
+                with patch("harness2.cli.sys.argv", ["harness", "status"]):
+                    from harness2.cli import main
+                    code = main()
+            self.assertEqual(code, 2)
 
 
 class LaunchTests(unittest.TestCase):

@@ -19,6 +19,7 @@ from .config import HarnessConfig
 from .doctor import core_integrity_artifacts, integrity_artifacts, run_checks, summarize
 from .migrate import migrate
 from .models import RunRequest
+from .platforms import HarnessSplitStateError
 from .jobs import JobManager
 from .orchestrator import Orchestrator
 from .policy import PolicyRefusal
@@ -1154,6 +1155,17 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
+    except HarnessSplitStateError as exc:
+        message = (
+            f"split Harness state detected:\n{exc}\n"
+            "No state root was selected. Fix the split first (set HARNESS2_HOME "
+            "or move one tree aside) and retry."
+        )
+        if getattr(args, "json", False):
+            emit({"success": False, "error": str(exc), "error_code": "split_state"}, True)
+        else:
+            print(message, file=sys.stderr)
+        return 2
     except Exception as exc:
         if getattr(args, "json", False):
             emit({"success": False, "error": redact(exc), "error_code": "internal_error"}, True)
