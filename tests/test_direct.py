@@ -21,7 +21,10 @@ from harness2.legacy_bridge import GovernedLegacyRuntimeDriver, execution_reques
 from harness2.models import CapabilityStatus, EngineResult, EngineStatus, RunRequest
 from harness2.router import assemble_candidates
 
-from .test_provider_routing import statuses
+try:
+    from .test_provider_routing import statuses
+except ImportError:  # `unittest discover -s tests` loads modules as top-level
+    from test_provider_routing import statuses
 
 
 def _statuses_with_direct(enabled=True):
@@ -36,9 +39,22 @@ def _statuses_with_direct(enabled=True):
 
 
 def _fake_adapter(keys=("GROQ_API_KEY",)):
-    with mock.patch.dict(os.environ, {k: "test-key" for k in keys}, clear=True):
-        adapter = DirectAdapter(None)
-    return adapter
+    return _KeyedDirectAdapter(keys)
+
+
+class _KeyedDirectAdapter(DirectAdapter):
+    """Test-only wrapper: DirectAdapter reads provider keys from the
+    environment at run() time (production behavior), so fake keys must stay
+    present for the whole call. Patches env only around run(); production
+    adapter and credential checks are untouched."""
+
+    def __init__(self, keys=("GROQ_API_KEY",)):
+        super().__init__(None)
+        self._keys = keys
+
+    def run(self, request):
+        with mock.patch.dict(os.environ, {k: "test-key" for k in self._keys}, clear=False):
+            return super().run(request)
 
 
 def _fake_openai_response(text="DIRECT-OK"):
