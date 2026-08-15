@@ -92,9 +92,16 @@ never a guess.
 
 - eligible: completed user/assistant/summary turns only; tool and error
   records are never injected as authority
+- selection prefers the **most recent** eligible turns: the newest turns that
+  fit within both budgets are chosen, then emitted in **chronological order**,
+  so recent references (e.g. "implement what we just decided") survive long
+  conversations while ancient turns fall outside the active window
 - one canonical JSON line per turn (`{"role","seq","content"}`) inside
   `<harness-session-context>...</harness-session-context>`; framing is
   collision-safe (escaped content, parsed back by tests)
+- the byte bound is strict: a turn that cannot fit the remaining byte budget
+  is skipped, never injected, so the encoded turn payload never exceeds
+  `byte_limit`; costs are counted in UTF-8 bytes, not characters
 - the current user message is never part of the reconstruction; it is
   appended separately with an explicit `[harness:current-request]` marker
 - effective `sensitive`/`untrusted` = current flags OR any included history —
@@ -146,10 +153,12 @@ provenance). Plain `run` is unchanged.
    propagate into the routed `RunRequest`.
 7. Sessions, history and context work with no providers present (restart
    survival).
-8. Context builder: limits, roles, unfinished-turn exclusion, collision-safe
-   framing.
+8. Context builder: recency preference (newest eligible turns, chronological
+   emission), strict byte bound (oversized and boundary turns skipped, never
+   injected), UTF-8 byte accounting, limits, roles, unfinished-turn
+   exclusion, collision-safe framing.
 9. Attachment seam registers and dedupes context ids.
 10. History is injected into routed runs with the explicit marker and the
     correct `harness_session_id`.
 
-Full suite (credential-free): 364 tests, 1 skipped, green.
+Full suite (credential-free): 368 tests, 1 skipped, green.

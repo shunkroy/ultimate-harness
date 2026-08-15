@@ -430,10 +430,72 @@ class ContextBuilderTests(unittest.TestCase):
         turns = self.build_turns(["user", "assistant"] * 30)
         builder = SessionContextBuilder(turn_limit=5, byte_limit=16384)
         context = builder.build(turns)
-        self.assertEqual(len(context.included_seq), 5)
+        self.assertEqual(tuple(context.included_seq), (56, 57, 58, 59, 60))
         self.assertTrue(context.truncated)
-        self.assertIn("content-1", context.text)
-        self.assertNotIn("content-30", context.text)
+        self.assertIn("content-60", context.text)
+        self.assertNotIn("content-1", context.text)
+
+    def test_recent_reference_survives_long_conversation(self):
+        turns = self.build_turns(["user", "assistant"] * 25)
+        builder = SessionContextBuilder(turn_limit=6, byte_limit=16384)
+        context = builder.build(turns)
+        self.assertEqual(tuple(context.included_seq), (45, 46, 47, 48, 49, 50))
+        self.assertIn("content-50", context.text)
+        self.assertIn("content-45", context.text)
+        self.assertNotIn("content-1", context.text)
+        self.assertNotIn("content-44", context.text)
+
+    def test_oversized_turn_never_bypasses_byte_limit(self):
+        from harness2.sessions import TurnRecord
+        turns = [
+            TurnRecord(seq=1, session_id="s", role="user", status="completed",
+                       text="z" * 4000, created_at=1.0),
+            TurnRecord(seq=2, session_id="s", role="user", status="completed",
+                       text="ok", created_at=2.0),
+        ]
+        builder = SessionContextBuilder(turn_limit=10, byte_limit=512)
+        context = builder.build(turns)
+        self.assertEqual(tuple(context.included_seq), (2,))
+        self.assertTrue(context.truncated)
+        self.assertNotIn("zzzz", context.text)
+        self.assert_payload_within_budget(context, 512)
+
+    def test_boundary_turn_exceeding_remaining_budget_skipped(self):
+        from harness2.sessions import TurnRecord
+        turns = [
+            TurnRecord(seq=1, session_id="s", role="user", status="completed",
+                       text="a" * 190, created_at=1.0),
+            TurnRecord(seq=2, session_id="s", role="user", status="completed",
+                       text="b" * 390, created_at=2.0),
+            TurnRecord(seq=3, session_id="s", role="user", status="completed",
+                       text="c" * 190, created_at=3.0),
+        ]
+        builder = SessionContextBuilder(turn_limit=10, byte_limit=512)
+        context = builder.build(turns)
+        self.assertEqual(tuple(context.included_seq), (1, 3))
+        self.assertTrue(context.truncated)
+        self.assert_payload_within_budget(context, 512)
+
+    def test_byte_budget_counts_utf8_bytes_not_characters(self):
+        from harness2.sessions import TurnRecord
+        hindi = "किर्ति" * 300
+        turns = [
+            TurnRecord(seq=1, session_id="s", role="user", status="completed",
+                       text=hindi, created_at=1.0),
+            TurnRecord(seq=2, session_id="s", role="user", status="completed",
+                       text="short", created_at=2.0),
+        ]
+        builder = SessionContextBuilder(turn_limit=10, byte_limit=256)
+        context = builder.build(turns)
+        self.assertEqual(tuple(context.included_seq), (2,))
+        self.assertTrue(context.truncated)
+        self.assert_payload_within_budget(context, 256)
+
+    def assert_payload_within_budget(self, context, budget):
+        body = context.text.split("</harness-session-context>")[0]
+        body = body.split("<harness-session-context>\n", 1)[1]
+        payload = "\n".join(line for line in body.splitlines() if line.strip())
+        self.assertLessEqual(len(payload.encode("utf-8")), budget)
 
     def test_byte_limit_truncates(self):
         turns = self.build_turns(["user"] * 10)

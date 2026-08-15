@@ -118,9 +118,15 @@ class SessionContextBuilder:
     Eligibility: completed user/assistant turns plus completed summaries.
     Tool/error records are never injected as authority. Each turn is framed as
     one canonical JSON line (``{"role": ..., "seq": ..., "content": ...}``) so
-    delimiter collisions inside content cannot corrupt framing. Both a turn
-    limit and a byte limit apply; the current user message is never part of
-    the reconstruction and must be appended separately by the caller.
+    delimiter collisions inside content cannot corrupt framing.
+
+    Selection prefers the **most recent** eligible turns: the newest turns
+    that fit within both budgets are chosen, then emitted in chronological
+    order, so recent references survive long conversations. Both limits are
+    strict: a turn that cannot fit the remaining byte budget is skipped,
+    never injected, so the encoded turn payload never exceeds ``byte_limit``.
+    The current user message is never part of the reconstruction and must be
+    appended separately by the caller.
     """
 
     def __init__(self, turn_limit: int = 20, byte_limit: int = 16384):
@@ -134,35 +140,33 @@ class SessionContextBuilder:
     def _eligible(self, turn: TurnRecord) -> bool:
         return turn.role in ("user", "assistant", "summary") and turn.status == "completed"
 
+    @staticmethod
+    def _line(turn: TurnRecord) -> str:
+        return json.dumps(
+            {"role": turn.role, "seq": turn.seq, "content": turn.text},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+
     def build(
         self, turns: Sequence[TurnRecord],
         current_sensitive: bool = False, current_untrusted: bool = False,
     ) -> SessionContext:
         eligible = [turn for turn in turns if self._eligible(turn)]
-        selected: List[TurnRecord] = []
+        selected_reversed: List[TurnRecord] = []
         budget = self.byte_limit
         truncated = False
-        for turn in eligible:
-            if len(selected) >= self.turn_limit:
+        for turn in reversed(eligible):
+            if len(selected_reversed) >= self.turn_limit:
                 truncated = True
                 break
-            line = json.dumps(
-                {"role": turn.role, "seq": turn.seq, "content": turn.text},
-                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-            )
-            cost = len(line.encode("utf-8")) + 1
-            if budget - cost < 0 and selected:
+            cost = len(self._line(turn).encode("utf-8")) + 1
+            if cost > budget:
                 truncated = True
-                break
-            selected.append(turn)
+                continue
+            selected_reversed.append(turn)
             budget -= cost
-        body = "\n".join(
-            json.dumps(
-                {"role": turn.role, "seq": turn.seq, "content": turn.text},
-                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-            )
-            for turn in selected
-        )
+        selected = list(reversed(selected_reversed))
+        body = "\n".join(self._line(turn) for turn in selected)
         text = (
             "<harness-session-context>\n" + body + "\n</harness-session-context>"
             if selected else ""
