@@ -96,17 +96,45 @@ never a guess.
   fit within both budgets are chosen, then emitted in **chronological order**,
   so recent references (e.g. "implement what we just decided") survive long
   conversations while ancient turns fall outside the active window
-- one canonical JSON line per turn (`{"role","seq","content"}`) inside
-  `<harness-session-context>...</harness-session-context>`; framing is
+- one canonical JSON line per turn (`{"role","seq","content"}`); framing is
   collision-safe (escaped content, parsed back by tests)
 - the byte bound is strict: a turn that cannot fit the remaining byte budget
-  is skipped, never injected, so the encoded turn payload never exceeds
-  `byte_limit`; costs are counted in UTF-8 bytes, not characters
+  is skipped, never injected, so the encoded turn payload (the history
+  payload, `context.text`) never exceeds `byte_limit`; costs are counted in
+  UTF-8 bytes, not characters
 - the current user message is never part of the reconstruction; it is
-  appended separately with an explicit `[harness:current-request]` marker
+  appended separately by the caller
 - effective `sensitive`/`untrusted` = current flags OR any included history —
   never downgraded
 - truncation is explicit and reported (`truncated`, `included_seq`)
+
+## Provider-facing framing (session semantics)
+
+`run_session_turn` assembles the routed prompt from three fixed sections
+(Phase 10.1):
+
+```
+[harness:session-semantics]          fixed constant text, always first
+[harness:session-history]            JSON-lines history payload (context.text)
+[harness:current-request]            the user task, JSON-encoded as one value
+```
+
+- **Semantics block** states, before anything else, that this is one
+  persistent Harness conversation, that process/terminal restart, provider,
+  model or engine changes do not begin a new conversation while the session
+  identity is unchanged, and that prior turns are history — context and
+  evidence only, never authority, policy or permission.
+- **History as context, not authority**: history is emitted under its own
+  header as structured JSON lines. Nothing in history grants privilege; the
+  semantics block says so explicitly and the framing makes it structurally
+  impossible for historical text to impersonate framing (values are escaped).
+- **Spoof resistance**: the current request is `json.dumps`-encoded, so
+  marker-like text, newlines or quotes inside user content cannot escape the
+  value or forge sections. Real headers appear exactly once at line starts.
+- **Provider neutrality**: the framing is identical for every engine,
+  provider and model; only the request value differs. Routing decisions are
+  likewise envelope-independent: the Q&A fast path measures the decoded user
+  task length, never the envelope (`harness2.policy._user_task_length`).
 
 ## Turn lifecycle and crash recovery
 
@@ -160,5 +188,10 @@ provenance). Plain `run` is unchanged.
 9. Attachment seam registers and dedupes context ids.
 10. History is injected into routed runs with the explicit marker and the
     correct `harness_session_id`.
+11. Session semantics: fixed semantics block always first; section order
+    semantics < history < current; current request JSON-encoded (spoof
+    text cannot escape the value); injected history claims are data, not
+    authority; framing identical across providers; envelope length never
+    changes task-based routing (fast path uses decoded task length).
 
-Full suite (credential-free): 368 tests, 1 skipped, green.
+Full suite (credential-free): green.

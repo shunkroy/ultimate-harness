@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, fields
 from typing import Dict, Optional
@@ -14,6 +15,30 @@ from .router import assemble_candidates
 _DURABLE = ("long-running", "long running", "background agent", "persistent", "ipython", "recursive subagent", "schedule", "heartbeat", "detach", "reattach", "rlm")
 _MESSAGING = ("telegram", "discord", "whatsapp", "signal", "send message", "broadcast", "gateway")
 _PARALLEL = ("parallel agents", "fan out", "fan-out", "delegate in parallel", "multiple workers")
+
+#: Harness-owned framing header preceding the JSON-encoded user task in
+#: session runs. Envelope, not task: routing decisions must ignore it.
+_CURRENT_REQUEST_HEADER = "[harness:current-request]"
+
+
+def _user_task_length(prompt: str) -> int:
+    """Length of the user task, excluding Harness-owned session framing.
+
+    Session runs envelope the user request as a JSON value under
+    ``[harness:current-request]``; the surrounding semantics/history sections
+    are fixed or variable Harness boilerplate and must never influence
+    task-based routing (e.g. the Q&A fast path). Without framing, the whole
+    prompt is the task, preserving legacy behavior.
+    """
+    if _CURRENT_REQUEST_HEADER in prompt:
+        remainder = prompt.split(_CURRENT_REQUEST_HEADER, 1)[1].strip()
+        try:
+            value = json.loads(remainder)
+        except ValueError:
+            value = remainder
+        if isinstance(value, str):
+            return len(value)
+    return len(prompt)
 
 
 @dataclass(frozen=True)
@@ -160,7 +185,7 @@ class PolicyRouter:
         # (raw REST, no agent boot — sub-second on this phone), with the
         # agent chain as fallbacks. Longer/complex prompts keep the control
         # path so agent capabilities are not lost.
-        if self.statuses.get("direct") and self.statuses["direct"].healthy and len(text) <= 200:
+        if self.statuses.get("direct") and self.statuses["direct"].healthy and _user_task_length(request.prompt) <= 200:
             route = assemble_candidates("direct", self.statuses)
             if route.candidates:
                 return RoutingDecision(
