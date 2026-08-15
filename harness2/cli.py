@@ -186,7 +186,7 @@ def request_from_args(args) -> RunRequest:
         provider=args.provider, timeout=args.timeout, cwd=args.cwd,
         sensitive=args.sensitive, untrusted=args.untrusted,
         no_fallback=args.no_fallback, dry_run=args.dry_run,
-        retries=args.retries,
+        retries=args.retries, harness_session_id=getattr(args, "session", None),
     )
 
 
@@ -282,8 +282,133 @@ def cmd_resources(args) -> int:
     return 2
 
 
+def session_service(app):
+    from .sessions import SessionService
+    return SessionService(app.store, os.path.join(app.config.state_root, "job.key"))
+
+
+def cmd_session(args) -> int:
+    from .sessions import SessionError
+    app = bootstrap()
+    service = session_service(app)
+    try:
+        if args.action == "new":
+            emit(service.create(title=getattr(args, "title", "") or ""), args.json)
+            return 0
+        if args.action == "list":
+            emit({"sessions": service.list(limit=args.limit)}, args.json)
+            return 0
+        if args.action == "info":
+            emit(service.info(args.id, limit=args.limit, include_text=args.text), args.json)
+            return 0
+        if args.action == "resume":
+            emit(service.resume(args.id), args.json)
+            return 0
+        if args.action == "close":
+            emit(service.close(args.id), args.json)
+            return 0
+        if args.action == "attach":
+            service.attach(args.id, args.context_id)
+            emit({"session_id": args.id, "attached": args.context_id}, args.json)
+            return 0
+    except SessionError as exc:
+        print(f"session error: {exc}", file=sys.stderr)
+        return 2
+    return 2
+
+
+def cmd_chat(args) -> int:
+    from .sessions import SessionError, run_session_turn
+    app = bootstrap()
+    service = session_service(app)
+    session_id = args.session
+    if not session_id:
+        created = service.create()
+        session_id = created["id"]
+    try:
+        service.resume(session_id)
+    except SessionError as exc:
+        print(f"session error: {exc}", file=sys.stderr)
+        return 2
+    print(f"[harness chat session={session_id}]  (/exit to quit)", file=sys.stderr)
+    try:
+        while True:
+            try:
+                prompt = input("> ")
+            except EOFError:
+                break
+            if not prompt.strip():
+                continue
+            if prompt.strip() in ("/exit", "/quit", "/close"):
+                if prompt.strip() == "/close":
+                    service.close(session_id)
+                break
+            try:
+                outcome = run_session_turn(
+                    service, app.foreground(), session_id, prompt,
+                    engine=args.engine, agent=args.agent, model=args.model,
+                    provider=args.provider, timeout=args.timeout,
+                    no_fallback=args.no_fallback,
+                )
+            except PolicyRefusal as exc:
+                print(f"policy refusal: {exc}", file=sys.stderr)
+                continue
+            except SessionError as exc:
+                print(f"session error: {exc}", file=sys.stderr)
+                continue
+            if args.json:
+                emit(outcome, True)
+            elif outcome["success"]:
+                print(outcome["assistant_turn"]["text"])
+            else:
+                turn = outcome["assistant_turn"]
+                print(f"error: {turn.get('error_code') or 'run_failed'}", file=sys.stderr)
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130
+    return 0
+
+
 def cmd_run(args) -> int:
     app = bootstrap()
+    if getattr(args, "session", None):
+        from .sessions import SessionError, run_session_turn
+        service = session_service(app)
+        try:
+            outcome = run_session_turn(
+                service, app.foreground(), args.session, args.prompt,
+                sensitive=args.sensitive, untrusted=args.untrusted,
+                engine=args.engine, agent=args.agent, model=args.model,
+                provider=args.provider, timeout=args.timeout, cwd=args.cwd,
+                no_fallback=args.no_fallback, dry_run=args.dry_run,
+                retries=args.retries,
+            )
+        except PolicyRefusal as exc:
+            if args.json:
+                emit({"success": False, "error": str(exc), "error_code": "policy_refusal"}, True)
+            else:
+                print(f"policy refusal: {exc}", file=sys.stderr)
+            return 2
+        except SessionError as exc:
+            print(f"session error: {exc}", file=sys.stderr)
+            return 2
+        payload = {
+            "session_id": outcome["session_id"],
+            "user_turn": outcome["user_turn"], "assistant_turn": outcome["assistant_turn"],
+            "decision": outcome["decision"], "run_id": outcome["run_id"],
+            "success": outcome["success"], "context": outcome["context"],
+        }
+        if args.json:
+            emit(payload, True)
+        else:
+            turn = outcome["assistant_turn"]
+            print(f"[session={outcome['session_id']} seq={outcome['user_turn']['seq']} "
+                  f"engine={turn.get('engine') or '-'} model={turn.get('model') or '-'}]")
+            if outcome["success"]:
+                print(turn["text"])
+            else:
+                print(f"error: {turn.get('error_code') or 'run_failed'}", file=sys.stderr)
+        return 0 if outcome["success"] else 1
     request = request_from_args(args)
     try:
         decision, result, run_id = app.foreground().run(request)
@@ -818,6 +943,32 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-fallback", action="store_true")
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--retries", type=nonnegative_int, default=1)
+    run.add_argument("--session")
+
+    chat = sub.add_parser("chat")
+    chat.add_argument("--session")
+    chat.add_argument("--engine", choices=("auto", "opencode", "zen", "prime", "hermes", "local", "direct"), default="auto")
+    chat.add_argument("--agent")
+    chat.add_argument("--model")
+    chat.add_argument("--provider")
+    chat.add_argument("--timeout", type=positive_int, default=240)
+    chat.add_argument("--no-fallback", action="store_true")
+
+    session = sub.add_parser("session")
+    session_sub = session.add_subparsers(dest="action", required=True)
+    session_sub.add_parser("new").add_argument("--title")
+    session_list = session_sub.add_parser("list")
+    session_list.add_argument("--limit", type=positive_int, default=50)
+    for action in ("resume", "close"):
+        child = session_sub.add_parser(action)
+        child.add_argument("id")
+    session_info = session_sub.add_parser("info")
+    session_info.add_argument("id")
+    session_info.add_argument("--text", action="store_true")
+    session_info.add_argument("--limit", type=positive_int, default=50)
+    attach_s = session_sub.add_parser("attach")
+    attach_s.add_argument("id")
+    attach_s.add_argument("context_id")
 
     task = sub.add_parser("task")
     task_sub = task.add_subparsers(dest="action", required=True)

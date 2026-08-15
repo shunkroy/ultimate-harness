@@ -143,13 +143,15 @@ class Store:
         with self.connect() as con:
             con.execute(
                 "INSERT INTO runs(id,started_at,finished_at,task_hash,engine,agent,model,provider,"
-                "status,exit_code,duration_ms,session_id,error_code,detail) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "status,exit_code,duration_ms,session_id,error_code,detail,"
+                "harness_session_id,provider_session_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run_id, started, finished, task_hash(request.prompt), result.engine,
                     decision.agent, decision.model, request.provider,
                     "succeeded" if result.success else "failed", result.exit_code,
                     int(result.duration * 1000), result.session_id, result.error_code, detail,
+                    request.harness_session_id, result.session_id,
                 ),
             )
         self.append_audit(

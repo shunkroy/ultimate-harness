@@ -20,6 +20,11 @@ from .security import PRIVATE_FILE_MODE, SecurityViolation, ensure_private_dir
 MAGIC = b"H2J1"
 MAC_SIZE = 32
 
+#: Session-turn envelopes are a distinct cryptographic domain from job
+#: payloads: different magic and different HMAC derivation labels, so a job
+#: envelope can never be accepted as session content and vice versa.
+SESSION_MAGIC = b"HT1S"
+
 
 class CryptoError(RuntimeError):
     pass
@@ -56,6 +61,10 @@ def load_or_create_key(path: str) -> bytes:
 
 def _derive(master: bytes, label: bytes) -> bytes:
     return hmac.new(master, b"harness2-job-" + label, hashlib.sha256).digest()
+
+
+def _derive_session(master: bytes, label: bytes) -> bytes:
+    return hmac.new(master, b"harness2-session-" + label, hashlib.sha256).digest()
 
 
 def _openssl(data: bytes, password: bytes, decrypt: bool = False, executable: str | None = None) -> bytes:
@@ -106,6 +115,25 @@ def decrypt(master: bytes, envelope: bytes, executable: str | None = None) -> by
         raise CryptoError("job envelope authentication failed")
     ciphertext = body[len(MAGIC):]
     return _openssl(ciphertext, _derive(master, b"enc"), decrypt=True, executable=executable)
+
+
+def encrypt_session_turn(master: bytes, plaintext: bytes, executable: str | None = None) -> bytes:
+    """Authenticated envelope for durable session turn content (domain-separated)."""
+    ciphertext = _openssl(plaintext, _derive_session(master, b"enc"), executable=executable)
+    body = SESSION_MAGIC + ciphertext
+    mac = hmac.new(_derive_session(master, b"mac"), body, hashlib.sha256).digest()
+    return body + mac
+
+
+def decrypt_session_turn(master: bytes, envelope: bytes, executable: str | None = None) -> bytes:
+    if len(envelope) < len(SESSION_MAGIC) + 16 + MAC_SIZE or not envelope.startswith(SESSION_MAGIC):
+        raise CryptoError("invalid session turn envelope")
+    body, supplied = envelope[:-MAC_SIZE], envelope[-MAC_SIZE:]
+    expected = hmac.new(_derive_session(master, b"mac"), body, hashlib.sha256).digest()
+    if not hmac.compare_digest(supplied, expected):
+        raise CryptoError("session turn envelope authentication failed")
+    ciphertext = body[len(SESSION_MAGIC):]
+    return _openssl(ciphertext, _derive_session(master, b"enc"), decrypt=True, executable=executable)
 
 
 def atomic_write_envelope(path: str, payload: bytes) -> None:

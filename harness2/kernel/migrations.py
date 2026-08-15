@@ -280,6 +280,58 @@ MIGRATIONS: tuple[Migration, ...] = (
         """,
         "CREATE INDEX idx_kernel_provenance_subject ON kernel_provenance_observations(subject_kind,subject_id,observed_at DESC)",
     )),
+    Migration(5, "harness_sessions", (
+        # Legacy runs.session_id keeps its historical meaning: the
+        # provider/runtime session id reported by the engine. Harness session
+        # identity is a separate, Harness-owned column; provider ids are
+        # additionally mirrored into an explicit column so old rows can be
+        # backfilled without reinterpreting their meaning.
+        "ALTER TABLE runs ADD COLUMN harness_session_id TEXT",
+        "ALTER TABLE runs ADD COLUMN provider_session_id TEXT",
+        "UPDATE runs SET provider_session_id = session_id WHERE provider_session_id IS NULL AND session_id IS NOT NULL",
+        """
+        CREATE TABLE sessions (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL DEFAULT '',
+          state TEXT NOT NULL CHECK(state IN ('open','closed')),
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL,
+          metadata_json TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE session_turns (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL REFERENCES sessions(id),
+          role TEXT NOT NULL CHECK(role IN ('user','assistant','tool','error','summary')),
+          content_envelope BLOB NOT NULL,
+          envelope_version INTEGER NOT NULL CHECK(envelope_version > 0),
+          key_id TEXT,
+          status TEXT NOT NULL,
+          engine TEXT,
+          provider TEXT,
+          model TEXT,
+          provider_session_id TEXT,
+          run_id TEXT,
+          sensitive INTEGER NOT NULL DEFAULT 0 CHECK(sensitive IN (0,1)),
+          untrusted INTEGER NOT NULL DEFAULT 0 CHECK(untrusted IN (0,1)),
+          error_code TEXT,
+          duration_ms REAL,
+          created_at REAL NOT NULL,
+          summary_from_seq INTEGER,
+          summary_to_seq INTEGER
+        )
+        """,
+        "CREATE INDEX idx_session_turns_lookup ON session_turns(session_id, seq)",
+        """
+        CREATE TABLE session_attachments (
+          session_id TEXT NOT NULL REFERENCES sessions(id),
+          context_id TEXT NOT NULL,
+          attached_at REAL NOT NULL,
+          PRIMARY KEY(session_id, context_id)
+        )
+        """,
+    )),
 )
 
 

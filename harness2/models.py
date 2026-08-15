@@ -29,6 +29,8 @@ class RunRequest:
     no_fallback: bool = False
     dry_run: bool = False
     retries: int = 1
+    #: Harness-owned session identity; distinct from provider session ids.
+    harness_session_id: Optional[str] = None
 
 
 @dataclass
