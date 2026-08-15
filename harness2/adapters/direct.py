@@ -71,6 +71,20 @@ KNOWN_MODELS: Dict[str, str] = {
 DEFAULT_MODEL = "groq/llama-3.3-70b-versatile"
 
 
+def device_context() -> str:
+    """On-device reality, injected as system context for every direct call.
+
+    The provider models are remote and genuinely do not know the phone's
+    local time/date/timezone — but the phone does. Sending it as a system
+    message lets "what time is it?" be answered correctly instead of with
+    "I don't have access to your local time zone."
+    """
+    now = time.localtime()
+    return (
+        time.strftime("local time %H:%M:%S, date %Y-%m-%d, timezone %Z (UTC%z)", now)
+    )
+
+
 def resolve_model(request: RunRequest) -> Optional[str]:
     """Preferred model for a direct run: explicit > env > built-in default.
 
@@ -181,12 +195,20 @@ class DirectAdapter(EngineAdapter):
     def _call(
         self, prefix: str, model_name: str, key: str, prompt: str, timeout: int,
     ) -> Tuple[str, str]:
+        system = (
+            "You are the Kirti phone assistant (Harness direct engine). "
+            "Device context — use it when asked about the time, date, or device: "
+            f"{device_context()}"
+        )
         openai_compat = _PROVIDERS[prefix][1]
         if openai_compat:
             url = _OPENAI_ENDPOINTS[prefix]
             payload = {
                 "model": model_name,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
                 "max_tokens": 2048,
             }
             headers = {
@@ -196,6 +218,7 @@ class DirectAdapter(EngineAdapter):
             return self._post(url, payload, headers, timeout, openai_compat=True)
         url = _GOOGLE_ENDPOINT.format(model=model_name) + f"?key={key}"
         payload = {
+            "system_instruction": {"parts": [{"text": system}]},
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"maxOutputTokens": 2048},
         }

@@ -158,6 +158,26 @@ class DirectRunTests(unittest.TestCase):
         self.assertTrue(result.success, result.error)
         self.assertEqual(result.metadata["resolved_model"], "groq/llama-3.3-70b-versatile")
 
+    def test_device_context_sent_to_openai_provider(self):
+        adapter = _fake_adapter()
+        with mock.patch("harness2.adapters.direct.urllib.request.urlopen",
+                        return_value=FakeResponse(_fake_openai_response("CTX-OK"))) as urlopen:
+            result = adapter.run(RunRequest("what time is it", model="groq/llama-3.3-70b-versatile"))
+        self.assertTrue(result.success, result.error)
+        sent = json.loads(urlopen.call_args.args[0].data)
+        self.assertEqual(sent["messages"][0]["role"], "system")
+        self.assertIn("local time", sent["messages"][0]["content"])
+
+    def test_device_context_sent_to_google_provider(self):
+        adapter = _fake_adapter(("GEMINI_API_KEY",))
+        with mock.patch("harness2.adapters.direct.urllib.request.urlopen",
+                        return_value=FakeResponse(_fake_google_response("CTX-OK"))) as urlopen:
+            result = adapter.run(RunRequest("what time is it", model="google/gemini-3.5-flash-lite"))
+        self.assertTrue(result.success, result.error)
+        sent = json.loads(urlopen.call_args.args[0].data)
+        self.assertIn("system_instruction", sent)
+        self.assertIn("local time", sent["system_instruction"]["parts"][0]["text"])
+
     def test_unknown_prefix(self):
         adapter = _fake_adapter()
         result = adapter.run(RunRequest("hello", model="anthropic/claude-x"))
