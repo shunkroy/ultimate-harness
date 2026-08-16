@@ -1,0 +1,11 @@
+[package]
+name = "harness-lowlevel"
+version.workspace = true
+edition.workspace = true
+description = "Capability-governed native platform access (safe adapter layer)"
+license = "MIT"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
