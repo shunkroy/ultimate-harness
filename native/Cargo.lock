@@ -112,6 +112,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "harness-ffi"
+version = "0.1.0"
+dependencies = [
+ "harness-world",
+ "serde_json",
+]
+
+[[package]]
+name = "harness-lowlevel"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "harness-native"
 version = "0.1.0"
 dependencies = [
