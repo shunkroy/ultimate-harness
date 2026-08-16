@@ -293,3 +293,21 @@ pub struct RunOutcome {
     pub duration_ms: f64,
     pub metadata: serde_json::Value,
 }
+// ---------------------------------------------------------------------------
+// Provenance tags (Milestone 2): the layer a fact/event belongs to.
+// Dream is not Canon. Branch is not Canon. Simulation is not Canon.
+// These tags ride on every compiled fact and every runtime event.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvenanceTag {
+    Canon,
+    Inferred,
+    Simulated,
+    UserCreated,
+    BranchDiverged,
+    Hypothetical,
+    Dream,
+    Replay,
+}
