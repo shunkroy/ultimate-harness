@@ -3,11 +3,11 @@
 
 use crate::governor::Capability;
 
-/// CPU feature flags available on this device (aarch64 focus).
+/// CPU feature flags available on this device (aarch64 and x86_64 focus).
 ///
-/// Uses `std::arch::is_aarch64_feature_detected!` where applicable and
-/// augments with /proc/cpuinfo parse (armv8 feature lines) for flags
-/// not covered by std. Pure read-only; no privileges required.
+/// Uses `std::arch::is_*_feature_detected!` where applicable and augments
+/// with /proc/cpuinfo parse (armv8 "Features" / x86 "flags" lines) for
+/// flags not covered by std. Pure read-only; no privileges required.
 pub fn cpu_features() -> Vec<String> {
     let mut features: Vec<String> = Vec::new();
     #[cfg(target_arch = "aarch64")]
@@ -25,16 +25,30 @@ pub fn cpu_features() -> Vec<String> {
             features.push("rdm".to_string());
         }
     }
-    // /proc/cpuinfo "Features" line(s): armv8 style tokens.
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("sse2") {
+            features.push("sse2".to_string());
+        }
+        if std::arch::is_x86_feature_detected!("avx") {
+            features.push("avx".to_string());
+        }
+        if std::arch::is_x86_feature_detected!("avx2") {
+            features.push("avx2".to_string());
+        }
+    }
+    // /proc/cpuinfo: armv8 "Features" line and x86 "flags" line.
     if let Ok(text) = std::fs::read_to_string("/proc/cpuinfo") {
         for line in text.lines() {
             let line = line.trim();
-            if let Some(value) = line.strip_prefix("Features") {
-                let value = value.trim_start_matches(':').trim();
-                for token in value.split_whitespace() {
-                    let token = token.to_string();
-                    if !features.contains(&token) {
-                        features.push(token);
+            for prefix in ["Features", "flags"] {
+                if let Some(value) = line.strip_prefix(prefix) {
+                    let value = value.trim_start_matches(':').trim();
+                    for token in value.split_whitespace() {
+                        let token = token.to_string();
+                        if !features.contains(&token) {
+                            features.push(token);
+                        }
                     }
                 }
             }
@@ -82,8 +96,11 @@ mod tests {
     #[test]
     fn cpu_features_probe_is_safe_and_readable() {
         let features = cpu_features();
-        assert!(!features.is_empty(), "expected at least asimd on aarch64");
+        assert!(!features.is_empty(), "no cpu features reported: {features:?}");
+        #[cfg(target_arch = "aarch64")]
         assert!(features.iter().any(|f| f == "asimd"), "asimd missing: {features:?}");
+        #[cfg(target_arch = "x86_64")]
+        assert!(features.iter().any(|f| f == "sse2"), "sse2 missing: {features:?}");
     }
 
     #[test]
