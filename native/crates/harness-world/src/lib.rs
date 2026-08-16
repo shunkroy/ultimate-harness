@@ -12,17 +12,23 @@
 //! historical world, sci-fi, fantasy, mixed genre or future format.
 
 pub mod compiler;
+pub mod export;
 pub mod index;
+pub mod knowledge;
 pub mod manifest;
 pub mod package;
 pub mod pipeline;
+pub mod replay;
 pub mod runtime;
 pub mod store;
 pub mod text;
 
 pub use compiler::Compiler;
+pub use export::{verify_export, WorldExport};
+pub use knowledge::{KnowledgeEntry, KnowledgeSource, KnowledgeStore};
 pub use manifest::{CompilerInfo, HDoorManifest, SourceFile, SourceIdentity};
 pub use package::{read_package, validate_package, write_package, Package, PackageError};
 pub use pipeline::{Intent, ParseError, ParseResult, Pipeline};
+pub use replay::{replay, ReplayCommand, ReplayOutcome};
 pub use runtime::{WorldSession, WorldSessionError};
 pub use store::{WorldStore, WorldStoreError};
