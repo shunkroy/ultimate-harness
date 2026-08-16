@@ -120,7 +120,8 @@ const PLACE_SUFFIXES: &[&str] = &[
     "well", "tower", "dungeon", "kingdom", "room", "gate", "bridge", "mountain", "cave", "lake",
     "river", "temple", "cathedral", "inn", "tavern", "library", "workshop", "lair", "hollow",
     "embers", "ash", "vale", "field", "plain", "desert", "sea", "coast", "harbor", "street",
-    "square", "market", "palace", "fortress", "citadel", "sanctum",
+    "square", "market", "palace", "fortress", "citadel", "sanctum", "station", "bay", "deck",
+    "greenhouse", "hangar", "reactor", "lab", "observatory", "bridge", "dock",
 ];
 const OBJECT_SUFFIXES: &[&str] = &[
     "staff", "sword", "key", "ring", "weapon", "scroll", "coin", "armor", "shield", "bow",
@@ -128,7 +129,10 @@ const OBJECT_SUFFIXES: &[&str] = &[
     "spear", "hammer", "lantern", "map", "potion", "gem", "mirror", "helmet", "cloak", "boots",
     "gloves", "banner", "bell", "candle", "compass", "quill", "wax", "seal",
 ];
-const PERSON_MARKERS: &[&str] = &["sama", "san", "sir", "lord", "lady", "keeper", "king", "queen"];
+const PERSON_MARKERS: &[&str] = &[
+    "sama", "san", "sir", "lord", "lady", "keeper", "king", "queen", "captain", "commander",
+    "engineer", "doctor", "professor", "major", "admiral", "sergeant", "lieutenant", "pilot",
+];
 const ACTION_VERBS: &[&str] = &[
     "keeps", "holds", "guards", "rules", "lives", "stands", "sits", "carries", "gives", "takes",
     "protects", "watches", "sleeps", "walks", "enters", "opens", "closes", "finds", "uses",
