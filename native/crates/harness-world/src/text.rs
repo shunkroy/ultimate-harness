@@ -117,7 +117,7 @@ mod tests {
         assert_eq!(normalize("ﬁne"), "fine");
         assert_eq!(normalize("  The   STAFF!  "), "the staff");
         assert_eq!(normalize("Café"), "cafe");
-        assert_eq!(normalize("Ainz Ooal Gown's"), "ainz ooal gown's");
+        assert_eq!(normalize("Eldrin Quickfoot's"), "eldrin quickfoot's");
     }
 
     #[test]
