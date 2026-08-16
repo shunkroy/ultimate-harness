@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/harness-core", "crates/harness-native"]
+members = ["crates/harness-core", "crates/harness-native", "crates/harness-world"]
 
 [workspace.package]
 version = "0.1.0"

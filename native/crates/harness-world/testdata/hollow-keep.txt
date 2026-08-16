@@ -1,0 +1,17 @@
+The Hollow Keep
+
+## The Keeper
+
+Keeper Sarn guards the Hollow Keep. The Silver Key is hidden in the Hall of Embers. Keeper Sarn keeps the Bronze Key in the Deep Well.
+
+Keeper Sarn stands watch beside the Iron Gate every night.
+
+## The Garden of Ash
+
+The Garden of Ash lies beyond the Iron Gate. The Deep Well stands at the center of the Garden of Ash.
+
+The Silver Key opens the Iron Gate. The Bronze Key opens the Deep Well. The traveller carries the Lantern of Dawn through the Garden of Ash.
+
+## The Traveller
+
+The traveller enters the Hollow Keep at dusk. The traveller rests in the Hall of Embers before dawn.
