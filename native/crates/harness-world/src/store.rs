@@ -52,6 +52,13 @@ pub struct StoredEvent {
     pub hash: String,
 }
 
+/// Result of forking a branch: where the fork diverged from.
+pub struct ForkInfo {
+    pub parent: String,
+    pub fork_seq: i64,
+    pub fork_hash: String,
+}
+
 pub struct WorldStore {
     conn: Connection,
     path: PathBuf,
@@ -166,6 +173,21 @@ impl WorldStore {
         Ok(rows.next().transpose().map_err(WorldStoreError::from)?.is_some())
     }
 
+    /// The base branch a branch forked from, if any.
+    pub fn base_branch(&self, branch_id: &str) -> Result<Option<String>, WorldStoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT base_branch FROM branches WHERE id = ?1")
+            .map_err(WorldStoreError::from)?;
+        let mut rows = stmt
+            .query_map(params![branch_id], |row| row.get::<_, Option<String>>(0))
+            .map_err(WorldStoreError::from)?;
+        rows.next()
+            .transpose()
+            .map_err(WorldStoreError::from)?
+            .ok_or_else(|| WorldStoreError::BranchNotFound(branch_id.to_string()))
+    }
+
     /// Total branch count (used by `world list`).
     pub fn branch_count(&self) -> Result<usize, WorldStoreError> {
         let count: i64 = self
@@ -182,6 +204,102 @@ impl WorldStore {
             .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
             .map_err(WorldStoreError::from)?;
         Ok(count)
+    }
+
+    /// The genesis anchor for a branch: the canon manifest hash for
+    /// normal branches, or the parent's last hash for forked branches.
+    pub fn genesis_prev(&self, branch_id: &str) -> Result<String, WorldStoreError> {
+        match self.meta(&format!("genesis_prev.{branch_id}"))? {
+            Some(anchor) => Ok(anchor),
+            None => self.canon_hash(),
+        }
+    }
+
+    /// Fork a branch at the parent's current tip. The child branch's
+    /// genesis event chains from the parent's last hash (provenance:
+    /// branch_diverged), so the fork point is cryptographically pinned.
+    pub fn fork_branch(
+        &mut self,
+        child_id: &str,
+        child_name: &str,
+        parent_branch: &str,
+        created_at: &str,
+    ) -> Result<ForkInfo, WorldStoreError> {
+        if !self.branch_exists(parent_branch)? {
+            return Err(WorldStoreError::BranchNotFound(parent_branch.to_string()));
+        }
+        if self.branch_exists(child_id)? {
+            return Err(WorldStoreError::Io(format!(
+                "branch '{}' already exists",
+                child_id
+            )));
+        }
+        let parent_events = self.events(parent_branch)?;
+        let (fork_seq, fork_hash) = match parent_events.last() {
+            Some(event) => (event.seq, event.hash.clone()),
+            None => {
+                return Err(WorldStoreError::EmptyChain(parent_branch.to_string()));
+            }
+        };
+        self.create_branch(child_id, child_name, Some(parent_branch), created_at)?;
+        self.set_meta(&format!("genesis_prev.{child_id}"), &fork_hash)?;
+        let detail = serde_json::json!({
+            "from_branch": parent_branch,
+            "from_seq": fork_seq,
+            "provenance": "branch_diverged",
+        });
+        let detail_json = detail.to_string();
+        let seq: i64 = 1;
+        let genesis_hash = chain_hash(
+            &fork_hash,
+            seq,
+            child_id,
+            "branch_fork",
+            "runtime",
+            &detail_json,
+            created_at,
+        );
+        let tx = self.conn.transaction().map_err(WorldStoreError::from)?;
+        tx.execute(
+            "INSERT INTO events (seq, branch_id, event_type, actor, detail_json, created_at, prev_hash, hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                seq,
+                child_id,
+                "branch_fork",
+                "runtime",
+                detail_json,
+                created_at,
+                fork_hash,
+                genesis_hash
+            ],
+        )
+        .map_err(WorldStoreError::from)?;
+        tx.commit().map_err(WorldStoreError::from)?;
+        Ok(ForkInfo {
+            parent: parent_branch.to_string(),
+            fork_seq,
+            fork_hash,
+        })
+    }
+
+    /// Copy all branch-scoped kv state from one branch to another
+    /// (used when forking, so the child resumes the parent's state).
+    pub fn kv_copy(&self, from_branch: &str, to_branch: &str) -> Result<(), WorldStoreError> {
+        if !self.branch_exists(from_branch)? || !self.branch_exists(to_branch)? {
+            return Err(WorldStoreError::BranchNotFound(format!(
+                "{}/{}",
+                from_branch, to_branch
+            )));
+        }
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO kv (branch_id, k, v)
+                 SELECT ?1, k, v FROM kv WHERE branch_id = ?2",
+                params![to_branch, from_branch],
+            )
+            .map_err(WorldStoreError::from)?;
+        Ok(())
     }
 
     pub fn last_hash(&self, branch_id: &str) -> Result<String, WorldStoreError> {
@@ -266,7 +384,7 @@ impl WorldStore {
     /// Walk the whole chain and re-verify every hash. Returns event count.
     pub fn verify_chain(&self, branch_id: &str) -> Result<usize, WorldStoreError> {
         let events = self.events(branch_id)?;
-        let mut expected_prev = self.canon_hash()?;
+        let mut expected_prev = self.genesis_prev(branch_id)?;
         for event in &events {
             let recomputed = chain_hash(
                 &expected_prev,

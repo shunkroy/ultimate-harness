@@ -6,12 +6,15 @@
 //! byte-identical snapshots.
 
 use crate::compiler::Entity;
+use crate::knowledge::{KnowledgeEntry, KnowledgeSource, KnowledgeStore};
 use crate::package::{read_package, Package, PackageError};
 use crate::pipeline::{Intent, ParseError, Pipeline};
 use crate::store::{WorldStore, WorldStoreError};
+use harness_core::types::ProvenanceTag;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
@@ -24,6 +27,10 @@ pub enum WorldSessionError {
     NotALocation(String),
     NotAnObject(String),
     NotAPerson(String),
+    NoTopic(String),
+    InvalidMode(String),
+    StoryModeRequired,
+    ReadOnlyWatcher,
     BranchMismatch { expected: String, actual: String },
     CanonMismatch { expected: String, actual: String },
     Io(String),
@@ -40,6 +47,16 @@ impl std::fmt::Display for WorldSessionError {
             WorldSessionError::NotALocation(name) => write!(f, "'{}' is not a place", name),
             WorldSessionError::NotAnObject(name) => write!(f, "'{}' is not a thing you can hold", name),
             WorldSessionError::NotAPerson(name) => write!(f, "'{}' is not someone you can address", name),
+            WorldSessionError::NoTopic(name) => write!(f, "nothing to ask '{}' about", name),
+            WorldSessionError::InvalidMode(mode) => {
+                write!(f, "'{}' is not a valid mode (story/traveller/chat/watcher/replay)", mode)
+            }
+            WorldSessionError::StoryModeRequired => {
+                write!(f, "story advancement requires story mode (mode story)")
+            }
+            WorldSessionError::ReadOnlyWatcher => {
+                write!(f, "watcher mode is read-only: no state-changing actions")
+            }
             WorldSessionError::BranchMismatch { expected, actual } => write!(
                 f,
                 "branch mismatch: session on '{}', store has '{}'",
@@ -83,7 +100,16 @@ pub struct SessionSnapshot {
     pub inventory: Vec<String>,
     pub event_count: i64,
     pub canon_hash: String,
+    pub mode: String,
+    pub story_position: i64,
 }
+
+/// All modes the runtime understands. Modes are recorded in state and
+/// guard behavior; watcher is read-only, story gates chapter advancement.
+pub const MODES: &[&str] = &["story", "traveller", "chat", "watcher", "replay"];
+
+/// A character present in the current location, used for witnessing.
+pub const DIALOGUE_HISTORY_CAP: usize = 20;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActionResult {
@@ -108,6 +134,65 @@ fn now_ms() -> String {
         .to_string()
 }
 
+/// Seed each person's canon knowledge from facts they participate in.
+/// No character is omniscient by default.
+fn seed_knowledge(package: &Package) -> KnowledgeStore {
+    let mut store = KnowledgeStore::default();
+    for person in package
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == "person")
+    {
+        let seeded = store.seed_from_canon(person, &package.facts, &package.entities);
+        for entry in seeded.entries {
+            store.add(entry);
+        }
+    }
+    store
+}
+
+/// Extract the mode name from "mode <name>" / "switch <name>".
+fn mode_from_raw(raw: &str) -> Option<String> {
+    let tokens = crate::text::tokenize(raw);
+    let index = tokens
+        .iter()
+        .position(|token| token == "mode" || token == "switch")?;
+    tokens.get(index + 1).cloned()
+}
+
+/// Extract a sanitized branch name from "branch <name>" / "fork <name>".
+fn branch_name_from(raw: &str) -> Option<String> {
+    let tokens = crate::text::tokenize(raw);
+    let index = tokens
+        .iter()
+        .position(|token| token == "branch" || token == "fork")?;
+    let rest = tokens.get(index + 1..)?;
+    if rest.is_empty() {
+        return None;
+    }
+    let name = rest.join("-").to_lowercase();
+    let sanitized: String = name
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+        .collect();
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
+fn source_label(source: &KnowledgeSource) -> &'static str {
+    match source {
+        KnowledgeSource::CanonFact => "canon",
+        KnowledgeSource::Witnessed => "I saw it",
+        KnowledgeSource::Learned => "learned",
+        KnowledgeSource::Rumored => "rumor",
+        KnowledgeSource::PlayerSupplied => "you told me",
+        KnowledgeSource::Inferred => "inferred",
+    }
+}
+
 pub struct WorldSession {
     package: Package,
     store: WorldStore,
@@ -115,8 +200,16 @@ pub struct WorldSession {
     instance_id: String,
     location: String,
     inventory: Vec<String>,
+    mode: String,
+    story_position: i64,
+    interlocutor: Option<String>,
+    dialogue_history: Vec<(String, String)>,
+    knowledge: KnowledgeStore,
     entities_by_id: BTreeMap<String, Entity>,
     pipeline: Pipeline<'static>,
+    /// clock() returns the timestamp used for event records; injectable
+    /// for deterministic replay
+    clock: Rc<dyn Fn() -> String>,
 }
 
 impl WorldSession {
@@ -127,6 +220,25 @@ impl WorldSession {
         world_id: &str,
         instance_id: &str,
         branch_id: &str,
+    ) -> Result<Self, WorldSessionError> {
+        Self::open_with_clock(
+            package_path,
+            state_root,
+            world_id,
+            instance_id,
+            branch_id,
+            Rc::new(now_ms),
+        )
+    }
+
+    /// Open with an explicit clock (deterministic replay entry point).
+    pub fn open_with_clock(
+        package_path: &Path,
+        state_root: &Path,
+        world_id: &str,
+        instance_id: &str,
+        branch_id: &str,
+        clock: Rc<dyn Fn() -> String>,
     ) -> Result<Self, WorldSessionError> {
         let package = read_package(package_path)?;
         let store = WorldStore::open(state_root, world_id, instance_id)?;
@@ -141,7 +253,7 @@ impl WorldSession {
             Some(_) => {}
             None => store.bind_canon(&canon_hash)?,
         }
-        store.create_branch(branch_id, branch_id, None, &now_ms())?;
+        store.create_branch(branch_id, branch_id, None, &(clock)())?;
 
         let entities_by_id: BTreeMap<String, Entity> = package
             .entities
@@ -159,6 +271,22 @@ impl WorldSession {
                 serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default()
             })
             .unwrap_or_default();
+        let mode = store
+            .kv_get(branch_id, "mode")?
+            .unwrap_or_else(|| "traveller".to_string());
+        let story_position: i64 = store
+            .kv_get(branch_id, "story_position")?
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(0);
+        let interlocutor = store.kv_get(branch_id, "interlocutor")?;
+        let dialogue_history: Vec<(String, String)> = store
+            .kv_get(branch_id, "dialogue_history")?
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        let knowledge: KnowledgeStore = match store.kv_get(branch_id, "knowledge")? {
+            Some(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+            None => seed_knowledge(&package),
+        };
 
         let index = Box::leak(Box::new(package.index.clone()));
         let pipeline = Pipeline::new(index);
@@ -170,8 +298,14 @@ impl WorldSession {
             instance_id: instance_id.to_string(),
             location,
             inventory,
+            mode,
+            story_position,
+            interlocutor,
+            dialogue_history,
+            knowledge,
             entities_by_id,
             pipeline,
+            clock,
         })
     }
 
@@ -189,7 +323,25 @@ impl WorldSession {
             },
             event_count,
             canon_hash: format!("sha256:{}", self.package.canon_source_hash),
+            mode: self.mode.clone(),
+            story_position: self.story_position,
         })
+    }
+
+    pub fn mode(&self) -> &str {
+        &self.mode
+    }
+
+    pub fn story_position(&self) -> i64 {
+        self.story_position
+    }
+
+    pub fn interlocutor(&self) -> Option<&str> {
+        self.interlocutor.as_deref()
+    }
+
+    pub fn knowledge(&self) -> &KnowledgeStore {
+        &self.knowledge
     }
 
     fn persist(&self) -> Result<(), WorldSessionError> {
@@ -199,6 +351,23 @@ impl WorldSession {
             .map_err(|err| WorldSessionError::Io(err.to_string()))?;
         self.store
             .kv_set(&self.branch_id, "inventory", &inventory_json)?;
+        self.store.kv_set(&self.branch_id, "mode", &self.mode)?;
+        self.store
+            .kv_set(&self.branch_id, "story_position", &self.story_position.to_string())?;
+        match &self.interlocutor {
+            Some(id) => self.store.kv_set(&self.branch_id, "interlocutor", id)?,
+            None => {
+                let _ = self.store.kv_get(&self.branch_id, "interlocutor")?;
+            }
+        }
+        let dialogue_json = serde_json::to_string(&self.dialogue_history)
+            .map_err(|err| WorldSessionError::Io(err.to_string()))?;
+        self.store
+            .kv_set(&self.branch_id, "dialogue_history", &dialogue_json)?;
+        let knowledge_json = serde_json::to_string(&self.knowledge)
+            .map_err(|err| WorldSessionError::Io(err.to_string()))?;
+        self.store
+            .kv_set(&self.branch_id, "knowledge", &knowledge_json)?;
         Ok(())
     }
 
@@ -217,10 +386,15 @@ impl WorldSession {
     }
 
     fn facts_about(&self, id: &str) -> Vec<String> {
+        let key = self
+            .entities_by_id
+            .get(id)
+            .map(|entity| crate::text::canonical(&entity.name))
+            .unwrap_or_else(|| id.to_string());
         self.package
             .facts
             .iter()
-            .filter(|fact| fact.subject == id || fact.object == id)
+            .filter(|fact| fact.subject == key || fact.object == key)
             .map(|fact| {
                 format!(
                     "{} {} {}",
@@ -237,17 +411,343 @@ impl WorldSession {
         event_type: &str,
         detail: &serde_json::Value,
     ) -> Result<String, WorldSessionError> {
-        let detail_json = serde_json::to_string(&detail)
+        self.record_at(event_type, detail, &(self.clock)())
+    }
+
+    fn record_at(
+        &mut self,
+        event_type: &str,
+        detail: &serde_json::Value,
+        created_at: &str,
+    ) -> Result<String, WorldSessionError> {
+        let detail_json = serde_json::to_string(detail)
             .map_err(|err| WorldSessionError::Io(err.to_string()))?;
         let hash = self.store.append_event(
             &self.branch_id,
             event_type,
             "traveller",
             &detail_json,
-            &now_ms(),
+            created_at,
         )?;
         self.persist()?;
         Ok(hash)
+    }
+
+    /// Story mode: advance the chapter pointer. The package is immutable;
+    /// history expresses the advance as an event. No-op at the final
+    /// chapter (story_position is capped at timeline length).
+    fn act_advance(&mut self, parsed: &crate::pipeline::ParseResult) -> Result<ActionResult, WorldSessionError> {
+        if self.mode != "story" {
+            return Err(WorldSessionError::StoryModeRequired);
+        }
+        if self.story_position >= self.package.timeline.len() as i64 {
+            return Ok(ActionResult {
+                text: "The story is at its end; there is nothing further to advance to.".to_string(),
+                event: None,
+            });
+        }
+        let (chapter_seq, chapter_summary) = {
+            let chapter = &self.package.timeline[self.story_position as usize];
+            (chapter.seq, chapter.summary.clone())
+        };
+        self.story_position += 1;
+        let detail = serde_json::json!({
+            "chapter_seq": chapter_seq,
+            "summary": chapter_summary,
+            "story_position": self.story_position,
+            "raw": parsed.raw,
+        });
+        let hash = self.record("chapter_advance", &detail)?;
+        Ok(ActionResult {
+            text: format!("Chapter {} — {}", chapter_seq, chapter_summary),
+            event: Some(ActionEvent {
+                event_type: "chapter_advance".into(),
+                actor: "traveller".into(),
+                detail,
+                hash,
+            }),
+        })
+    }
+
+    /// Switch session mode. Every switch is recorded as an event; modes
+    /// guard behavior (watcher = read-only, story gates advancement).
+    fn act_mode(&mut self, parsed: &crate::pipeline::ParseResult) -> Result<ActionResult, WorldSessionError> {
+        let mode = mode_from_raw(&parsed.raw).ok_or_else(|| {
+            WorldSessionError::InvalidMode("missing mode name".to_string())
+        })?;
+        if !MODES.contains(&mode.as_str()) {
+            return Err(WorldSessionError::InvalidMode(mode));
+        }
+        let old_mode = self.mode.clone();
+        self.mode = mode.clone();
+        let detail = serde_json::json!({
+            "from": old_mode,
+            "to": mode,
+            "raw": parsed.raw,
+        });
+        let hash = self.record("mode_change", &detail)?;
+        Ok(ActionResult {
+            text: format!("Mode switched from {} to {}.", old_mode, mode),
+            event: Some(ActionEvent {
+                event_type: "mode_change".into(),
+                actor: "traveller".into(),
+                detail,
+                hash,
+            }),
+        })
+    }
+
+    /// Fork the current branch at the current tip. The child resumes the
+    /// parent's state (location, inventory, dialogue, knowledge, mode,
+    /// story position) and chains its genesis from the parent's last
+    /// hash with provenance branch_diverged. The session continues on
+    /// the new branch.
+    fn act_branch(&mut self, parsed: &crate::pipeline::ParseResult) -> Result<ActionResult, WorldSessionError> {
+        let name = branch_name_from(&parsed.raw).ok_or_else(|| {
+            WorldSessionError::Io("branch name required, e.g. 'branch what-if'".to_string())
+        })?;
+        if name == self.branch_id {
+            return Err(WorldSessionError::Io(format!(
+                "branch '{}' already exists",
+                name
+            )));
+        }
+        let created_at = (self.clock)();
+        let fork = self.store.fork_branch(&name, &name, &self.branch_id, &created_at)?;
+        self.store.kv_copy(&self.branch_id, &name)?;
+        self.branch_id = name.clone();
+        let detail = serde_json::json!({
+            "from_branch": fork.parent,
+            "fork_seq": fork.fork_seq,
+            "fork_hash": fork.fork_hash,
+            "provenance": "branch_diverged",
+            "raw": parsed.raw,
+        });
+        // one clock tick per act: genesis and record share the timestamp
+        let hash = self.record_at("branch_fork", &detail, &created_at)?;
+        Ok(ActionResult {
+            text: format!(
+                "Forked branch '{}' from '{}' at event {}.\nThe session now continues on '{}'.",
+                name, fork.parent, fork.fork_seq, name
+            ),
+            event: Some(ActionEvent {
+                event_type: "branch_fork".into(),
+                actor: "traveller".into(),
+                detail,
+                hash,
+            }),
+        })
+    }
+
+    /// Deterministic, knowledge-bounded conversation with a character:
+    /// the character answers ONLY from what they know, labeled with its
+    /// source. Learning is explicit (tell), witnessing is automatic for
+    /// the current interlocutor, and nothing ever mutates canon.
+    fn talk_response(
+        &mut self,
+        target: &crate::index::EntityRef,
+        parsed: &crate::pipeline::ParseResult,
+    ) -> Result<ActionResult, WorldSessionError> {
+        let id = target.id.clone();
+        let name = self.entity_name(&id);
+        // plain talk without a topic: establish/keep the conversation
+        if parsed.topic.is_empty() {
+            let is_location_question = parsed.raw.to_lowercase().contains("where");
+            if is_location_question {
+                return Err(WorldSessionError::NoTopic(name));
+            }
+            self.interlocutor = Some(id.clone());
+            self.push_dialogue("traveller", &parsed.raw);
+            self.push_dialogue(&name, &format!("{} waits to hear what you ask.", name));
+            let detail = serde_json::json!({
+                "target": id,
+                "raw": parsed.raw,
+            });
+            let hash = self.record("talk", &detail)?;
+            return Ok(ActionResult {
+                text: format!(
+                    "You talk to {}.\n{} waits to hear what you ask.",
+                    name, name
+                ),
+                event: Some(ActionEvent {
+                    event_type: "talk".into(),
+                    actor: "traveller".into(),
+                    detail,
+                    hash,
+                }),
+            });
+        }
+
+        let topic = parsed.topic[0].clone();
+        let topic_id = topic.id.clone();
+        let topic_name = self.entity_name(&topic_id);
+        let teaching = parsed.raw.to_lowercase().contains("tell");
+
+        self.interlocutor = Some(id.clone());
+        self.push_dialogue("traveller", &parsed.raw);
+
+        let known = self.knowledge.query(&id, &topic_id);
+        if known.is_empty() && teaching {
+            // explicit teaching: the character learns, branch-scoped
+            self.knowledge.add(KnowledgeEntry {
+                character_id: id.clone(),
+                about_id: topic_id.clone(),
+                claim: format!("the traveller told me about {}", topic_name),
+                source: KnowledgeSource::PlayerSupplied,
+                provenance: ProvenanceTag::BranchDiverged,
+                event_seq: None,
+                confidence: 1.0,
+            });
+            let detail = serde_json::json!({
+                "target": id,
+                "topic": topic_id,
+                "source": "player_supplied",
+                "raw": parsed.raw,
+            });
+            let hash = self.record("learn", &detail)?;
+            let reply = format!("{} nods. \"The traveller told me about {}.\"", name, topic_name);
+            self.push_dialogue(&name, &reply);
+            return Ok(ActionResult {
+                text: reply,
+                event: Some(ActionEvent {
+                    event_type: "learn".into(),
+                    actor: "traveller".into(),
+                    detail,
+                    hash,
+                }),
+            });
+        }
+
+        if known.is_empty() {
+            let reply = format!(
+                "{} says: \"I don't know anything about {}.\"",
+                name, topic_name
+            );
+            self.push_dialogue(&name, &reply);
+            let detail = serde_json::json!({
+                "target": id,
+                "topic": topic_id,
+                "raw": parsed.raw,
+            });
+            let hash = self.record("talk", &detail)?;
+            return Ok(ActionResult {
+                text: reply,
+                event: Some(ActionEvent {
+                    event_type: "talk".into(),
+                    actor: "traveller".into(),
+                    detail,
+                    hash,
+                }),
+            });
+        }
+
+        // location question: claims referencing a place, else the canon
+        // seed location of the object (objects_by_location is compile-
+        // time canon data — grounded, never invented)
+        let is_location_question = parsed.raw.to_lowercase().contains("where");
+        let mut lines = Vec::new();
+        let mut answered = false;
+        for entry in &known {
+            if is_location_question && self.kind(&entry.about_id) != "place" {
+                let claim_mentions_place = self.package.entities.iter().any(|entity| {
+                    entity.kind == "place"
+                        && entry
+                            .claim
+                            .to_lowercase()
+                            .contains(&entity.name.to_lowercase())
+                });
+                if !claim_mentions_place {
+                    continue;
+                }
+            }
+            lines.push(format!(
+                "{} says: \"{}\" (I know this: {})",
+                name,
+                entry.claim,
+                source_label(&entry.source)
+            ));
+            answered = true;
+        }
+        if !answered && is_location_question {
+            if let Some(place_id) = self
+                .package
+                .seed
+                .objects_by_location
+                .iter()
+                .find(|(_, objects)| objects.contains(&topic_id))
+                .map(|(place_id, _)| place_id.clone())
+            {
+                let place_name = self.entity_name(&place_id);
+                let reply = format!(
+                    "{} says: \"I know the {} is in the {}.\"",
+                    name, topic_name, place_name
+                );
+                self.push_dialogue(&name, &reply);
+                let detail = serde_json::json!({
+                    "target": id,
+                    "topic": topic_id,
+                    "answer": "seed_location",
+                    "raw": parsed.raw,
+                });
+                let hash = self.record("talk", &detail)?;
+                return Ok(ActionResult {
+                    text: reply,
+                    event: Some(ActionEvent {
+                        event_type: "talk".into(),
+                        actor: "traveller".into(),
+                        detail,
+                        hash,
+                    }),
+                });
+            }
+        }
+        let text = if answered {
+            lines.join("\n")
+        } else {
+            format!("{} says: \"I don't know where {} is.\"", name, topic_name)
+        };
+        self.push_dialogue(&name, &text);
+        let detail = serde_json::json!({
+            "target": id,
+            "topic": topic_id,
+            "raw": parsed.raw,
+        });
+        let hash = self.record("talk", &detail)?;
+        Ok(ActionResult {
+            text,
+            event: Some(ActionEvent {
+                event_type: "talk".into(),
+                actor: "traveller".into(),
+                detail,
+                hash,
+            }),
+        })
+    }
+
+    /// The current interlocutor witnesses the traveller's actions.
+    /// Witnessed knowledge is branch-scoped; it never touches canon.
+    fn witness(&mut self, action: &str, object_id: &str) {
+        let Some(interlocutor) = self.interlocutor.clone() else {
+            return;
+        };
+        let object_name = self.entity_name(object_id);
+        let claim = format!("the traveller {} {}", action, object_name);
+        self.knowledge.add(KnowledgeEntry {
+            character_id: interlocutor,
+            about_id: object_id.to_string(),
+            claim,
+            source: KnowledgeSource::Witnessed,
+            provenance: ProvenanceTag::BranchDiverged,
+            event_seq: None,
+            confidence: 0.9,
+        });
+    }
+
+    fn push_dialogue(&mut self, speaker: &str, text: &str) {
+        self.dialogue_history.push((speaker.to_string(), text.to_string()));
+        while self.dialogue_history.len() > DIALOGUE_HISTORY_CAP {
+            self.dialogue_history.remove(0);
+        }
     }
 
     /// Resolve parse targets to a single entity, using context to break
@@ -322,18 +822,23 @@ impl WorldSession {
                 let detail = serde_json::json!({
                     "location": self.location,
                     "inventory": self.inventory,
+                    "mode": self.mode,
+                    "story_position": self.story_position,
                     "raw": parsed.raw,
                 });
                 let hash = self.record("status", &detail)?;
-                return Ok(ActionResult {
-                    text: format!(
-                        "You are at {}.\nHere: {}\nYou hold: {}\nEvents: {}",
-                        self.entity_name(&self.location),
+                let mut lines = vec![
+                    format!("You are at {}.", self.entity_name(&self.location)),
+                    format!(
+                        "Here: {}",
                         if objects_here.is_empty() {
                             "nothing".to_string()
                         } else {
                             objects_here.join(", ")
-                        },
+                        }
+                    ),
+                    format!(
+                        "You hold: {}",
                         if self.inventory.is_empty() {
                             "nothing".to_string()
                         } else {
@@ -342,12 +847,32 @@ impl WorldSession {
                                 .map(|id| self.entity_name(id))
                                 .collect::<Vec<_>>()
                                 .join(", ")
-                        },
-                        self.store
-                            .verify_chain(&self.branch_id)
-                            .map(|count| count.to_string())
-                            .unwrap_or_else(|_| "?".to_string())
+                        }
                     ),
+                    format!("Mode: {}", self.mode),
+                ];
+                if self.mode == "story" {
+                    lines.push(format!(
+                        "Story: chapter {}/{}",
+                        self.story_position,
+                        self.package.timeline.len()
+                    ));
+                }
+                if let Some(interlocutor) = &self.interlocutor {
+                    lines.push(format!(
+                        "Speaking with: {}",
+                        self.entity_name(interlocutor)
+                    ));
+                }
+                lines.push(format!(
+                    "Events: {}",
+                    self.store
+                        .verify_chain(&self.branch_id)
+                        .map(|count| count.to_string())
+                        .unwrap_or_else(|_| "?".to_string())
+                ));
+                return Ok(ActionResult {
+                    text: lines.join("\n"),
                     event: Some(ActionEvent {
                         event_type: "status".into(),
                         actor: "traveller".into(),
@@ -358,11 +883,37 @@ impl WorldSession {
             }
             Intent::Help => {
                 return Ok(ActionResult {
-                    text: "Commands: inspect/take/drop/go/talk/use/open/close/give/status/help"
+                    text: "Commands: inspect/take/drop/go/talk/use/open/close/give/status/help | advance | mode <story|traveller|chat|watcher|replay> | branch <name>"
                         .to_string(),
                     event: None,
                 });
             }
+            _ => {}
+        }
+
+        // watcher mode is read-only (mode switching is the escape hatch)
+        if self.mode == "watcher" {
+            match parsed.intent {
+                Intent::Take
+                | Intent::Drop
+                | Intent::Go
+                | Intent::Use
+                | Intent::Open
+                | Intent::Close
+                | Intent::Give
+                | Intent::Advance
+                | Intent::Branch => {
+                    return Err(WorldSessionError::ReadOnlyWatcher);
+                }
+                _ => {}
+            }
+        }
+
+        // story/mode/branch operate on session state, not entities
+        match parsed.intent {
+            Intent::Advance => return self.act_advance(&parsed),
+            Intent::Mode => return self.act_mode(&parsed),
+            Intent::Branch => return self.act_branch(&parsed),
             _ => {}
         }
 
@@ -430,6 +981,7 @@ impl WorldSession {
                 }
                 self.inventory.push(id.clone());
                 let hash = self.record("take", &detail)?;
+                self.witness("took", &id);
                 Ok(ActionResult {
                     text: format!("You take the {}.", name),
                     event: Some(ActionEvent {
@@ -449,6 +1001,7 @@ impl WorldSession {
                 }
                 self.inventory.retain(|item| item != &id);
                 let hash = self.record("drop", &detail)?;
+                self.witness("dropped", &id);
                 Ok(ActionResult {
                     text: format!("You drop the {}.", name),
                     event: Some(ActionEvent {
@@ -508,18 +1061,7 @@ impl WorldSession {
                 if self.kind(&id) != "person" {
                     return Err(WorldSessionError::NotAPerson(name));
                 }
-                let mut lines = vec![format!("{} speaks:", name)];
-                lines.extend(self.facts_about(&id));
-                let hash = self.record("talk", &detail)?;
-                Ok(ActionResult {
-                    text: lines.join("\n"),
-                    event: Some(ActionEvent {
-                        event_type: "talk".into(),
-                        actor: "traveller".into(),
-                        detail: detail.clone(),
-                        hash,
-                    }),
-                })
+                self.talk_response(&target, &parsed)
             }
             Intent::Give => {
                 if !self.inventory.contains(&id) {
@@ -536,12 +1078,38 @@ impl WorldSession {
                     }),
                 })
             }
-            Intent::Status | Intent::Help | Intent::Unknown => {
+            Intent::Status | Intent::Help | Intent::Unknown | Intent::Advance | Intent::Mode
+            | Intent::Branch => {
                 Err(WorldSessionError::Parse(ParseError::UnknownIntent(
                     utterance.to_string(),
                 )))
             }
         }
+    }
+
+    /// Renderer-neutral signed export of this branch's history.
+    pub fn export(&self) -> Result<crate::export::WorldExport, WorldSessionError> {
+        let canon_hash = format!("sha256:{}", self.package.canon_source_hash);
+        let state = crate::export::ExportState {
+            location: self.location.clone(),
+            inventory: self.inventory.clone(),
+            mode: self.mode.clone(),
+            story_position: self.story_position,
+            interlocutor: self.interlocutor.clone(),
+            knowledge_entries: self.knowledge.entries.len(),
+            knowledge: self.knowledge.clone(),
+        };
+        crate::export::export_branch(
+            &self.store,
+            &self.package.manifest,
+            &canon_hash,
+            &canon_hash,
+            &self.instance_id,
+            &self.branch_id,
+            state,
+            &(self.clock)(),
+        )
+        .map_err(|err| WorldSessionError::Io(err.to_string()))
     }
 
     /// Close the session (final persist + chain verification).
