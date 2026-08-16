@@ -1,0 +1,13 @@
+[package]
+name = "harness-ffi"
+version.workspace = true
+edition.workspace = true
+description = "Stable C ABI over the harness world runtime"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+harness-world = { path = "../harness-world" }
+serde_json = "1"
