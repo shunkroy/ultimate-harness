@@ -31,9 +31,10 @@ the capability-governed layer (`harness-lowlevel`).
 | Symbol | Purpose |
 |--------|---------|
 | `harness_abi_version` | ABI version (u32). Bump on breaking change. |
+| `harness_abi_is_compatible` | Negotiation: 1 iff requested version == current, else 0. |
 | `harness_version` | Human-readable version (malloc'd, free via `harness_string_free`). |
 | `harness_last_error` | Per-thread last error (malloc'd). |
-| `harness_string_free` | Free any returned string. |
+| `harness_string_free` | Free any returned string (NULL-safe). |
 | `harness_world_compile` | source.txt + id + title → `.hdoor` package dir. |
 | `harness_world_open` | Open/resume session; returns opaque u64 handle. |
 | `harness_world_act` | One utterance → JSON `{ok,text,event}`. |
@@ -47,6 +48,18 @@ ABI rules:
 - Every entry point catches panics — nothing unwinds across the ABI.
 - All strings are heap-allocated; ownership transfers to the caller.
 - Handle lifetime: open → (act|export)* → close; never reuse.
+- Output pointers (`handle_out`, `result_out`) must be non-null or the
+  call fails cleanly (`-1` + last-error) — null outputs are never
+  dereferenced.
+- Input C strings may be null or contain invalid UTF-8: both fail
+  cleanly with an error, never a crash; output result pointers are
+  left untouched on failure.
+- Consumers MUST call `harness_abi_is_compatible()` before any other
+  symbol and refuse to continue on 0; unknown/future versions are
+  rejected so a newer consumer cannot misread this library.
+- Handles are bound to the thread that opened them (per-thread
+  last-error); distinct handles may be used from distinct threads
+  concurrently.
 
 ## 3. Binary-first notes (endianness / alignment / versioning)
 
@@ -57,9 +70,11 @@ ABI rules:
 - **Alignment**: the ABI surface uses only `i32`, `u32`, `u64`,
   `*const c_char`, `*mut c_char` — no structs cross the boundary, so
   padding/alignment differences between compilers are a non-issue.
-- **Versioning**: `harness_abi_version()` is the contract version.
-  Symbols are never removed; new functionality adds new symbols and
-  bumps the version. `harness_version()` reports the crate version.
+- **Versioning**: `harness_abi_version()` is the contract version;
+  `harness_abi_is_compatible()` is the single negotiation gate every
+  consumer must pass before use. Symbols are never removed; new
+  functionality adds new symbols and bumps the version.
+  `harness_version()` reports the crate version.
 - **Integer width**: handles are `u64` on all platforms; `size_t` is
   never part of the ABI.
 
@@ -79,8 +94,9 @@ Flow: `request → capability check → policy → governor → adapter → op �
 
 ## 5. Status vocabulary
 
-- `harness-ffi`: IMPLEMENTED / TESTED (Rust ABI tests + device C
-  caller proof at `device/ffi_proof/main.c`).
+- `harness-ffi`: IMPLEMENTED / TESTED (Rust ABI tests: negotiation,
+  null/malformed inputs, use-after-close, thread concurrency; device C
+  caller proof at `device/ffi_proof/main.c` incl. negative checks).
 - `harness-lowlevel`: IMPLEMENTED / TESTED (governor + adapter tests).
 - `unsafe_adapter::raw_cpuinfo_mmap`: DOCUMENTED / DESIGNED only.
 

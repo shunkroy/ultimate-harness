@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 extern unsigned int harness_abi_version(void);
+extern unsigned int harness_abi_is_compatible(unsigned int requested_version);
 extern char *harness_version(void);
 extern char *harness_last_error(void);
 extern void harness_string_free(char *ptr);
@@ -75,10 +76,18 @@ int main(void) {
 
     check(harness_abi_version() == 1, "abi version == 1");
 
+    check(harness_abi_is_compatible(1) == 1, "abi negotiation: v1 accepted");
+    check(harness_abi_is_compatible(0) == 0, "abi negotiation: v0 rejected");
+    check(harness_abi_is_compatible(999) == 0, "abi negotiation: unknown rejected");
+
     char *ver = harness_version();
     printf("version: %s\n", ver);
     check(strstr(ver, "harness-ffi") != NULL, "version string present");
     harness_string_free(ver);
+
+    /* null free must be safe */
+    harness_string_free(NULL);
+    check(1, "string_free(NULL) safe");
 
     rc = harness_world_compile(source_path, "ffi-proof-world", "FFI Proof World", out_dir);
     if (rc != 0) printf("compile error: %s\n", last_err());
@@ -101,6 +110,21 @@ int main(void) {
     check(rc == 0 && strstr(result ? result : "", "Sarn") != NULL, "act talk (Sarn replies)");
     if (result) { harness_string_free(result); result = NULL; }
 
+    /* negative tests: malformed inputs must fail cleanly, never crash */
+    rc = harness_world_act(handle, "status", NULL);
+    check(rc != 0, "act with NULL result_out fails cleanly");
+
+    rc = harness_world_act(handle, NULL, &result);
+    check(rc != 0 && result == NULL, "act with NULL utterance fails cleanly");
+    if (result) { harness_string_free(result); result = NULL; }
+
+    rc = harness_world_act(handle, "\xff\xfe\xfd garbage", &result);
+    check(rc != 0 && result == NULL, "act with invalid UTF-8 fails cleanly");
+    if (result) { harness_string_free(result); result = NULL; }
+
+    rc = harness_world_export_json(handle, NULL);
+    check(rc != 0, "export with NULL result_out fails cleanly");
+
     rc = harness_world_export_json(handle, &result);
     check(rc == 0 && strstr(result ? result : "", "hdoor_export_v1") != NULL,
           "signed export JSON (schema v1)");
@@ -112,6 +136,10 @@ int main(void) {
     /* stale handle must fail cleanly — no crash */
     rc = harness_world_close(handle);
     check(rc != 0, "stale handle fails cleanly");
+
+    rc = harness_world_act(handle, "status", &result);
+    check(rc != 0 && result == NULL, "act on closed handle fails cleanly");
+    if (result) { harness_string_free(result); result = NULL; }
 
     printf("FFI PROOF: %s\n", failures == 0 ? "PASS" : "FAIL");
     return failures == 0 ? 0 : 1;

@@ -9,13 +9,22 @@
 //! - The ABI is the contract for future consumers: Kotlin/Swift/C/C++/
 //!   Zig/WASM/desktop GUI/CLI/TUI/game engines. Internal Rust APIs are
 //!   NOT exposed here; this surface grows only by deliberate design.
+//! - Output pointers must be non-null or the call fails cleanly
+//!   (HARNESS_ERR + last-error set) — no dereference of null outputs.
+//! - Input C strings may be null or carry invalid UTF-8: both fail
+//!   cleanly with an error, never a crash.
+//! - Consumers MUST call harness_abi_is_compatible() before any other
+//!   symbol and refuse to continue on 0. Unknown/future versions are
+//!   rejected, so a newer consumer cannot misread this library.
+//! - Handles are bound to the thread that opened them and must not be
+//!   used concurrently; distinct handles may be used from distinct
+//!   threads concurrently.
 //!
 //! ABI version: 1 (semver on the exported symbol set).
 
 use std::ffi::{CStr, CString, c_char};
 use std::path::Path;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::ptr;
 use std::sync::Mutex;
 
 use harness_world::runtime::WorldSession;
@@ -114,6 +123,18 @@ unsafe fn string_out(handle: *mut *mut c_char, value: &str) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn harness_abi_version() -> u32 {
     1
+}
+
+/// Negotiation entry point: returns 1 when `requested_version` matches
+/// the current ABI (1), 0 otherwise. Consumers MUST call this before
+/// any other symbol and refuse to continue on 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn harness_abi_is_compatible(requested_version: u32) -> u32 {
+    if requested_version == harness_abi_version() {
+        1
+    } else {
+        0
+    }
 }
 
 /// Human-readable library version.
@@ -306,6 +327,10 @@ pub extern "C" fn harness_world_act(
 ) -> i32 {
     capture(|| {
         clear_last_error();
+        if result_out.is_null() {
+            set_last_error("result_out is null");
+            return HARNESS_ERR;
+        }
         let session = match handle_session(handle) {
             Ok(session) => unsafe { &mut *session },
             Err(_) => {
@@ -344,6 +369,10 @@ pub extern "C" fn harness_world_export_json(
 ) -> i32 {
     capture(|| {
         clear_last_error();
+        if result_out.is_null() {
+            set_last_error("result_out is null");
+            return HARNESS_ERR;
+        }
         let session = match handle_session(handle) {
             Ok(session) => unsafe { &*session },
             Err(_) => {
@@ -393,6 +422,7 @@ pub extern "C" fn harness_world_close(handle: u64) -> i32 {
 mod tests {
     use super::*;
     use std::ffi::CString;
+    use std::ptr;
 
     const FIXTURE: &str = "The Hollow Keep\n\n## The Keeper\n\nKeeper Sarn guards the Hollow Keep. The Silver Key is hidden in the Hall of Embers. Keeper Sarn keeps the Bronze Key in the Deep Well.\n\n## The Garden of Ash\n\nThe Garden of Ash lies beyond the Iron Gate. The Deep Well stands at the center of the Garden of Ash.";
 
@@ -495,5 +525,175 @@ mod tests {
         let text = unsafe { CStr::from_ptr(err).to_str().unwrap().to_string() };
         c_free(err);
         assert!(text.contains("invalid handle"));
+    }
+
+    #[test]
+    fn negotiation_rejects_unknown_versions() {
+        assert_eq!(harness_abi_is_compatible(1), 1);
+        assert_eq!(harness_abi_is_compatible(0), 0);
+        assert_eq!(harness_abi_is_compatible(2), 0);
+        assert_eq!(harness_abi_is_compatible(u32::MAX), 0);
+    }
+
+    #[test]
+    fn null_and_malformed_inputs_fail_cleanly() {
+        let base = std::env::temp_dir().join(format!("ffi-null-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let source_path = base.join("world.txt");
+        let out_dir = base.join("package");
+        let state_root = base.join("state");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(&source_path, FIXTURE).unwrap();
+
+        let code = harness_world_compile(
+            c(source_path.to_str().unwrap()),
+            c("ffi-world"),
+            c("FFI World"),
+            c(out_dir.to_str().unwrap()),
+        );
+        assert_eq!(code, HARNESS_OK, "{}", unsafe {
+            CStr::from_ptr(harness_last_error()).to_str().unwrap()
+        });
+
+        let mut handle: u64 = 0;
+        let code = harness_world_open(
+            c(out_dir.to_str().unwrap()),
+            c(state_root.to_str().unwrap()),
+            c("i1"),
+            c("main"),
+            &mut handle,
+        );
+        assert_eq!(code, HARNESS_OK, "{}", unsafe {
+            CStr::from_ptr(harness_last_error()).to_str().unwrap()
+        });
+        assert_ne!(handle, 0);
+
+        // null result_out must fail cleanly, not segfault
+        let code = harness_world_act(handle, c("status"), ptr::null_mut());
+        assert_eq!(code, HARNESS_ERR);
+        let code = harness_world_export_json(handle, ptr::null_mut());
+        assert_eq!(code, HARNESS_ERR);
+
+        // null utterance with valid result pointer: result stays untouched
+        let mut result: *mut c_char = ptr::null_mut();
+        let code = harness_world_act(handle, ptr::null(), &mut result);
+        assert_eq!(code, HARNESS_ERR);
+        assert!(result.is_null(), "result must stay untouched on error");
+
+        // invalid UTF-8 utterance fails cleanly
+        let bad = unsafe { CString::from_vec_unchecked(vec![0xff, 0xfe, 0xfd, b'x']) };
+        let code = harness_world_act(handle, bad.as_ptr(), &mut result);
+        assert_eq!(code, HARNESS_ERR);
+
+        let code = harness_world_close(handle);
+        assert_eq!(code, HARNESS_OK);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn use_after_close_fails_cleanly() {
+        let base = std::env::temp_dir().join(format!("ffi-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let source_path = base.join("world.txt");
+        let out_dir = base.join("package");
+        let state_root = base.join("state");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(&source_path, FIXTURE).unwrap();
+
+        let code = harness_world_compile(
+            c(source_path.to_str().unwrap()),
+            c("ffi-world"),
+            c("FFI World"),
+            c(out_dir.to_str().unwrap()),
+        );
+        assert_eq!(code, HARNESS_OK, "{}", unsafe {
+            CStr::from_ptr(harness_last_error()).to_str().unwrap()
+        });
+
+        let mut handle: u64 = 0;
+        let code = harness_world_open(
+            c(out_dir.to_str().unwrap()),
+            c(state_root.to_str().unwrap()),
+            c("i1"),
+            c("main"),
+            &mut handle,
+        );
+        assert_eq!(code, HARNESS_OK);
+        let code = harness_world_close(handle);
+        assert_eq!(code, HARNESS_OK);
+
+        let mut result: *mut c_char = ptr::null_mut();
+        let code = harness_world_act(handle, c("status"), &mut result);
+        assert_eq!(code, HARNESS_ERR);
+        assert!(result.is_null());
+        let err = harness_last_error();
+        let text = unsafe { CStr::from_ptr(err).to_str().unwrap().to_string() };
+        c_free(err);
+        assert!(text.contains("invalid handle"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn string_free_null_is_safe() {
+        harness_string_free(ptr::null_mut());
+    }
+
+    #[test]
+    fn distinct_handles_work_concurrently() {
+        let base = std::env::temp_dir().join(format!("ffi-threads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let source_path = base.join("world.txt");
+        let out_dir = base.join("package");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(&source_path, FIXTURE).unwrap();
+
+        let code = harness_world_compile(
+            c(source_path.to_str().unwrap()),
+            c("ffi-world"),
+            c("FFI World"),
+            c(out_dir.to_str().unwrap()),
+        );
+        assert_eq!(code, HARNESS_OK, "{}", unsafe {
+            CStr::from_ptr(harness_last_error()).to_str().unwrap()
+        });
+
+        let handles: Vec<u64> = ["t1", "t2", "t3"]
+            .iter()
+            .map(|inst| {
+                let state_root = base.join(format!("state-{inst}"));
+                let mut handle: u64 = 0;
+                let code = harness_world_open(
+                    c(out_dir.to_str().unwrap()),
+                    c(state_root.to_str().unwrap()),
+                    c(inst),
+                    c("main"),
+                    &mut handle,
+                );
+                assert_eq!(code, HARNESS_OK, "{}", unsafe {
+                    CStr::from_ptr(harness_last_error()).to_str().unwrap()
+                });
+                handle
+            })
+            .collect();
+
+        let threads: Vec<_> = handles
+            .into_iter()
+            .map(|handle| {
+                std::thread::spawn(move || {
+                    let mut result: *mut c_char = ptr::null_mut();
+                    let code = harness_world_act(handle, c("status"), &mut result);
+                    assert_eq!(code, HARNESS_OK);
+                    let json = read_out(&mut result);
+                    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                    assert_eq!(parsed["ok"], true);
+                    harness_world_close(handle)
+                })
+            })
+            .collect();
+
+        for thread in threads {
+            assert_eq!(thread.join().unwrap(), HARNESS_OK);
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
