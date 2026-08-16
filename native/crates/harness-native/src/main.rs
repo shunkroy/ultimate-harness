@@ -105,6 +105,12 @@ fn cmd_world_compile(source: &str, world_id: &str, title: &str, out: &str) -> Re
     Ok(())
 }
 
+/// world_id from the package manifest (single source of truth).
+fn world_id_from_package(package_dir: &str) -> Result<String, String> {
+    let package = harness_world::read_package(Path::new(package_dir)).map_err(|err| err.to_string())?;
+    Ok(package.manifest.world_id)
+}
+
 fn cmd_world_open(
     package_dir: &str,
     state_root: &str,
@@ -152,6 +158,39 @@ fn cmd_world_open(
         schema: harness_core::current_schema(),
         kind: "world_session_snapshot".to_string(),
         payload: snapshot,
+    });
+    Ok(())
+}
+
+fn cmd_world_export(
+    package_dir: &str,
+    state_root: &str,
+    instance_id: &str,
+    branch_id: &str,
+    out_path: &str,
+) -> Result<(), String> {
+    let session = WorldSession::open(
+        Path::new(package_dir),
+        Path::new(state_root),
+        &world_id_from_package(package_dir)?,
+        instance_id,
+        branch_id,
+    )
+    .map_err(|err| err.to_string())?;
+    let export = session.export().map_err(|err| err.to_string())?;
+    session.close().map_err(|err| err.to_string())?;
+    let verified = harness_world::export::verify_export(&export).map_err(|err| err.to_string())?;
+    let json = serde_json::to_string_pretty(&export).map_err(|err| err.to_string())?;
+    std::fs::write(out_path, json).map_err(|err| err.to_string())?;
+    emit(&Envelope {
+        schema: harness_core::current_schema(),
+        kind: "world_export".to_string(),
+        payload: serde_json::json!({
+            "branch": branch_id,
+            "events": verified,
+            "schema": export.schema,
+            "out": out_path,
+        }),
     });
     Ok(())
 }
@@ -283,6 +322,25 @@ fn cmd_world_list_cli(args: &[String]) -> Result<(), String> {
     cmd_world_list(&root)
 }
 
+fn cmd_world_export_cli(args: &[String]) -> Result<(), String> {
+    let package_dir = args
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .cloned()
+        .ok_or_else(|| "world export requires <package-dir>".to_string())?;
+    let root = flag_value(args, "--root");
+    let instance = flag_value(args, "--instance");
+    let branch = flag_value(args, "--branch");
+    let out = flag_value(args, "--out");
+    if root.is_empty() || instance.is_empty() || branch.is_empty() || out.is_empty() {
+        return Err(
+            "world export requires --root <state_root> --instance <id> --branch <name> --out <file.json>"
+                .to_string(),
+        );
+    }
+    cmd_world_export(&package_dir, &root, &instance, &branch, &out)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
@@ -307,6 +365,9 @@ fn main() -> ExitCode {
         }
         "world" if args.len() >= 2 && args[1] == "open" => {
             cmd_world_open_cli(&args[2..])
+        }
+        "world" if args.len() >= 2 && args[1] == "export" => {
+            cmd_world_export_cli(&args[2..])
         }
         "world" if args.len() >= 2 && args[1] == "list" => {
             cmd_world_list_cli(&args[2..])
