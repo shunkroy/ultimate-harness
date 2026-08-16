@@ -24,6 +24,9 @@ pub enum Intent {
     Give,
     Status,
     Help,
+    Advance,
+    Mode,
+    Branch,
     Unknown,
 }
 
@@ -33,6 +36,7 @@ pub enum ParseError {
     UnknownIntent(String),
     NoTarget,
     AmbiguousTarget(ResolveError),
+    AmbiguousTopic(ResolveError),
 }
 
 impl std::fmt::Display for ParseError {
@@ -42,6 +46,7 @@ impl std::fmt::Display for ParseError {
             ParseError::UnknownIntent(raw) => write!(f, "no intent recognized in '{}'", raw),
             ParseError::NoTarget => write!(f, "no target entity found"),
             ParseError::AmbiguousTarget(err) => write!(f, "{}", err),
+            ParseError::AmbiguousTopic(err) => write!(f, "ambiguous topic: {}", err),
         }
     }
 }
@@ -52,6 +57,9 @@ impl std::error::Error for ParseError {}
 pub struct ParseResult {
     pub intent: Intent,
     pub targets: Vec<EntityRef>,
+    /// conversational topic entities (Talk): entities referenced besides
+    /// the interlocutor target
+    pub topic: Vec<EntityRef>,
     pub raw: String,
 }
 
@@ -74,6 +82,9 @@ fn intent_for_verb(verb: &str) -> Option<Intent> {
         "give" | "gives" | "hand" | "hands" | "offer" | "offers" => Some(Intent::Give),
         "status" | "inventory" | "inv" | "state" | "where" | "whereami" => Some(Intent::Status),
         "help" | "commands" | "?" | "what" => Some(Intent::Help),
+        "advance" | "next" | "continue" => Some(Intent::Advance),
+        "mode" | "switch" => Some(Intent::Mode),
+        "branch" | "fork" => Some(Intent::Branch),
         _ => None,
     }
 }
@@ -81,6 +92,8 @@ fn intent_for_verb(verb: &str) -> Option<Intent> {
 const STOP_WORDS: &[&str] = &[
     "the", "a", "an", "to", "at", "in", "on", "of", "with", "my", "me", "it", "this", "that",
     "please", "now", "then", "there", "here", "for", "and", "i", "am", "is", "can", "could",
+    "about", "where", "who", "what", "when", "how", "why", "you", "your", "do", "does", "are",
+    "know", "knows", "say", "says", "he", "she", "they", "his", "her", "their",
 ];
 
 /// Split a phrase into candidate target spans (longest-first), so
@@ -145,6 +158,17 @@ impl<'a> Pipeline<'a> {
             return Ok(ParseResult {
                 intent,
                 targets: Vec::new(),
+                topic: Vec::new(),
+                raw: utterance.to_string(),
+            });
+        }
+
+        // mode/branch/advance operate on the raw utterance, not entities
+        if matches!(intent, Intent::Mode | Intent::Branch | Intent::Advance) {
+            return Ok(ParseResult {
+                intent,
+                targets: Vec::new(),
+                topic: Vec::new(),
                 raw: utterance.to_string(),
             });
         }
@@ -153,8 +177,17 @@ impl<'a> Pipeline<'a> {
         //    unambiguous phrase pins the target; shorter ambiguous
         //    phrases are ignored once a longer one resolved. Ambiguity
         //    only fails closed when NO longer phrase resolved.
-        let mut targets: Vec<EntityRef> = Vec::new();
+        //    Conversational topics (Talk) are collected AFTER the target
+        //    and fail closed on ambiguity: "ask Sarn about the key" must
+        //    not guess between the Silver Key and the Bronze Key.
+        let mut unique: Vec<EntityRef> = Vec::new();
+        let mut topic: Vec<EntityRef> = Vec::new();
         let mut seen: Vec<String> = Vec::new();
+        // Talk: an ambiguous phrase with only the interlocutor pinned is a
+        // candidate ambiguous TOPIC — but a LONGER phrase later in the
+        // scan may resolve it uniquely (longest-wins). So ambiguity is
+        // parked; it fails closed only if no topic resolves at all.
+        let mut pending_topic_ambiguity: Option<ResolveError> = None;
         for phrase in candidate_phrases(&normalized) {
             if seen.contains(&phrase) {
                 continue;
@@ -168,30 +201,44 @@ impl<'a> Pipeline<'a> {
                 m.matched_alias = phrase.clone();
             }
             if matches.len() > 1 {
-                if targets.is_empty() {
+                if unique.is_empty() {
                     return Err(ParseError::AmbiguousTarget(ResolveError::Ambiguous {
                         query: phrase.clone(),
                         candidates: matches,
                     }));
                 }
+                if intent == Intent::Talk && unique.len() == 1 {
+                    if pending_topic_ambiguity.is_none() {
+                        pending_topic_ambiguity = Some(ResolveError::Ambiguous {
+                            query: phrase.clone(),
+                            candidates: matches,
+                        });
+                    }
+                    continue;
+                }
                 continue; // a longer phrase already pinned the target
             }
-            targets.extend(matches);
-        }
-        // de-dup by id
-        let mut unique: Vec<EntityRef> = Vec::new();
-        for target in targets {
-            if !unique.iter().any(|u| u.id == target.id) {
-                unique.push(target);
+            if !unique.iter().any(|u| u.id == matches[0].id) {
+                unique.push(matches[0].clone());
             }
         }
+        // first match is the target, the rest are topics
         if unique.is_empty() {
             return Err(ParseError::NoTarget);
+        }
+        if unique.len() > 1 {
+            topic.extend(unique.drain(1..));
+        }
+        if topic.is_empty() {
+            if let Some(ambiguity) = pending_topic_ambiguity {
+                return Err(ParseError::AmbiguousTopic(ambiguity));
+            }
         }
 
         Ok(ParseResult {
             intent,
             targets: unique,
+            topic,
             raw: utterance.to_string(),
         })
     }
